@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
 from backend.api.routes.meetings import router as meetings_router
+from backend.api.routes.upload import router as upload_router
 from backend.api.websocket import manager
 from backend.utils.logger import setup_logger
 from backend.config import Config
@@ -19,6 +20,7 @@ app.add_middleware(
 )
 
 app.include_router(meetings_router)
+app.include_router(upload_router)
 
 
 @app.get("/health")

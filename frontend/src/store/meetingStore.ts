@@ -1,12 +1,23 @@
 import { create } from "zustand";
 import type { TranscriptSegment, AudioDevice, AppStatus } from "../types/meeting";
 
+export interface AudioApp {
+  pid: number;
+  name: string;
+  volume: number;
+  muted: boolean;
+  peak: number;
+}
+
 interface MeetingStore {
   status: AppStatus;
   meetingId: string | null;
   segments: TranscriptSegment[];
   devices: AudioDevice[];
+  audioApps: AudioApp[];
   selectedMicDevice: number | null;
+  selectedLoopbackDevice: number | null;
+  useWasapi: boolean;
   duration: number;
   error: string | null;
 
@@ -14,7 +25,10 @@ interface MeetingStore {
   setMeetingId: (id: string | null) => void;
   addSegment: (seg: TranscriptSegment) => void;
   setDevices: (d: AudioDevice[]) => void;
+  setAudioApps: (a: AudioApp[]) => void;
   setSelectedMic: (i: number | null) => void;
+  setSelectedLoopback: (i: number | null) => void;
+  setUseWasapi: (b: boolean) => void;
   setDuration: (d: number) => void;
   setError: (e: string | null) => void;
   reset: () => void;
@@ -25,7 +39,10 @@ export const useMeetingStore = create<MeetingStore>((set) => ({
   meetingId: null,
   segments: [],
   devices: [],
+  audioApps: [],
   selectedMicDevice: null,
+  selectedLoopbackDevice: null,
+  useWasapi: true,
   duration: 0,
   error: null,
 
@@ -33,7 +50,10 @@ export const useMeetingStore = create<MeetingStore>((set) => ({
   setMeetingId: (meetingId) => set({ meetingId }),
   addSegment: (seg) => set((s) => ({ segments: [...s.segments, seg] })),
   setDevices: (devices) => set({ devices }),
+  setAudioApps: (audioApps) => set({ audioApps }),
   setSelectedMic: (selectedMicDevice) => set({ selectedMicDevice }),
+  setSelectedLoopback: (selectedLoopbackDevice) => set({ selectedLoopbackDevice }),
+  setUseWasapi: (useWasapi) => set({ useWasapi }),
   setDuration: (duration) => set({ duration }),
   setError: (error) => set({ error }),
   reset: () =>

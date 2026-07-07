@@ -7,7 +7,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/meetings": "http://127.0.0.1:8765",
+      "/upload": "http://127.0.0.1:8765",
       "/health": "http://127.0.0.1:8765",
+      "/ws": {
+        target: "ws://127.0.0.1:8765",
+        ws: true,
+      },
     },
   },
 });
