@@ -25,6 +25,13 @@ router = APIRouter(prefix="/upload", tags=["upload"])
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mp4", ".aac", ".wma"}
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+MEETINGS_DIR = Path("meetings").resolve()
+
+
+def _safe_title(raw: str) -> str:
+    """Strip path separators and dangerous chars to prevent path traversal."""
+    raw = raw.replace("\\", "").replace("/", "").replace("\x00", "")
+    return re.sub(r"[^a-zA-Z0-9\s_\-.]", "", raw).strip()[:80] or "untitled"
 
 
 def _generate_title(analysis: dict, start_time: datetime = None) -> str:
@@ -88,10 +95,10 @@ def _transcribe_file(audio_path: str, model_size: str = "base", language: str = 
 
 def _save_upload_transcript(mid: str, filename: str, segments: list[TranscriptSegment], duration: float, analysis: dict = None, title: str = None) -> str:
     """Save uploaded transcript as markdown."""
-    Path("meetings").mkdir(exist_ok=True)
+    MEETINGS_DIR.mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    display_title = title or filename or mid
-    path = f"meetings/upload_{ts}_{mid}_{display_title}.md"
+    display_title = _safe_title(title or filename or mid)
+    path = MEETINGS_DIR / f"upload_{ts}_{mid}_{display_title}.md"
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# {display_title}\n")

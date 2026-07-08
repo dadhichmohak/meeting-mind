@@ -4,9 +4,14 @@ Uses groq-python client for fast inference.
 Reads GROQ_API_KEY and GROQ_MODEL from .env file.
 """
 import json
+import time
 
 from loguru import logger
 from backend.config import Config
+
+# Cache health check results per API key to avoid repeated API calls
+_health_cache: dict[str, tuple[bool, float]] = {}
+_HEALTH_CACHE_TTL = 300  # 5 minutes
 
 
 class GroqEngine:
@@ -100,25 +105,29 @@ class GroqEngine:
             return None
 
     def health_check(self) -> bool:
-        """Check if API key is valid and Groq is accessible."""
+        """Check if API key is valid and Groq is accessible. Cached for 5 minutes."""
         if not self.api_key:
-            logger.warning("No GROQ_API_KEY set in .env")
             return False
+
+        # Return cached result if fresh
+        cached = _health_cache.get(self.api_key)
+        if cached and (time.monotonic() - cached[1]) < _HEALTH_CACHE_TTL:
+            return cached[0]
 
         client = self._get_client()
         if not client:
             return False
 
         try:
-            logger.debug(f"Health check: testing model '{self.model}'...")
             response = client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": "ok"}],
                 max_tokens=5,
             )
-            logger.info(f"✓ Groq API health check passed (model: {self.model})")
+            _health_cache[self.api_key] = (True, time.monotonic())
+            logger.info(f"Groq health check passed (model: {self.model})")
             return True
         except Exception as e:
+            _health_cache[self.api_key] = (False, time.monotonic())
             logger.error(f"Groq health check failed: {e}")
-            logger.info(f"Make sure '{self.model}' is available at https://console.groq.com/docs/models")
             return False

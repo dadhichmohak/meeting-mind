@@ -1,15 +1,17 @@
 """Helpers for formatting transcript text."""
 
-from datetime import timedelta
-
 
 def format_timestamp(seconds) -> str:
-    """Format seconds as mm:ss."""
+    """Format seconds as mm:ss (or h:mm:ss if >= 1 hour)."""
     try:
         seconds = int(float(seconds or 0))
     except (TypeError, ValueError):
         seconds = 0
-    return str(timedelta(seconds=seconds))[2:].zfill(5)  # mm:ss
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def build_raw_transcript(segments) -> str:

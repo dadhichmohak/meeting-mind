@@ -49,7 +49,7 @@ class _Session:
     active: bool = False
     meeting_id: str = ""
     start_time: float = 0.0
-    segments: list[TranscriptSegment] = []
+    segments: list[TranscriptSegment] | None = None
     capture: AudioCapture | None = None
     transcriber: Transcriber | None = None
     _loop: asyncio.AbstractEventLoop | None = None
@@ -62,7 +62,7 @@ class _Session:
             self.active = False
             self.meeting_id = ""
             self.start_time = 0.0
-            self.segments = []
+            self.segments = None
             self.capture = None
             self.transcriber = None
             self._loop = None
@@ -244,9 +244,8 @@ async def search_meetings(q: str = "", limit: int = 20, meeting_id: str = ""):
         # If no text matches found and query looks like a question, try LLM answer
         llm_answer = None
         is_question = "?" in q or q.lower().startswith(("what", "how", "why", "when", "where", "who", "which", "is ", "are ", "did ", "was ", "were "))
+        transcript_parts = []
         if not results and is_question:
-            transcript_parts = []
-
             # Priority 1: Use the specific meeting's transcript if provided
             if meeting_id:
                 target_meeting = db.get(Meeting, meeting_id)
@@ -285,20 +284,21 @@ async def search_meetings(q: str = "", limit: int = 20, meeting_id: str = ""):
                         title = m.title or m.id
                         transcript_parts.append(f"[{title}]: {text}")
 
-            if transcript_parts:
-                from backend.llm.groq_engine import GroqEngine
-                llm = GroqEngine()
-                if llm.health_check():
-                    combined = "\n\n".join(transcript_parts)
-                    system = (
-                        "You are a helpful meeting assistant. Answer the user's question "
-                        "based on the meeting transcripts provided. Be concise and factual. "
-                        "If the transcripts don't contain relevant information, say so."
-                    )
-                    user = f"Meeting transcripts:\n{combined}\n\nQuestion: {q}"
-                    llm_answer = llm.generate(user, system=system, temperature=0.3)
+    # LLM call outside DB session to avoid holding connection open during network I/O
+    if transcript_parts and not results:
+        from backend.llm.groq_engine import GroqEngine
+        llm = GroqEngine()
+        if llm.health_check():
+            combined = "\n\n".join(transcript_parts)
+            system = (
+                "You are a helpful meeting assistant. Answer the user's question "
+                "based on the meeting transcripts provided. Be concise and factual. "
+                "If the transcripts don't contain relevant information, say so."
+            )
+            user = f"Meeting transcripts:\n{combined}\n\nQuestion: {q}"
+            llm_answer = llm.generate(user, system=system, temperature=0.3)
 
-        return {"results": results[:limit], "query": q, "llm_answer": llm_answer}
+    return {"results": results[:limit], "query": q, "llm_answer": llm_answer}
 
 
 class AskRequest(BaseModel):
@@ -387,7 +387,7 @@ async def get_meeting(meeting_id: str):
             "started_at": m.started_at.isoformat() if m.started_at else None,
             "ended_at": m.ended_at.isoformat() if m.ended_at else None,
             "duration_seconds": m.duration_seconds,
-            "analysis": json.loads(m.analysis) if m.analysis else None,
+            "analysis": _safe_json(m.analysis),
             "notes": note.content if note else "",
             "segments": [
                 {
@@ -426,15 +426,16 @@ async def delete_meeting(meeting_id: str):
 
 @router.post("/start")
 async def start_meeting(req: StartRequest):
-    if session.active:
-        return {"error": "Meeting already active", "meeting_id": session.meeting_id}
+    with session._lock:
+        if session.active:
+            return {"error": "Meeting already active", "meeting_id": session.meeting_id}
 
-    session.meeting_id = str(uuid.uuid4())[:8].upper()
-    session.start_time = time.time()
-    session.segments = []
-    session._loop = asyncio.get_running_loop()
-    session._summary_language = req.summary_language
-    session._groq_api_key = req.groq_api_key or None
+        session.meeting_id = str(uuid.uuid4())[:8].upper()
+        session.start_time = time.time()
+        session.segments = []
+        session._loop = asyncio.get_running_loop()
+        session._summary_language = req.summary_language
+        session._groq_api_key = req.groq_api_key or None
 
     # Persist the meeting row
     with SessionLocal() as db:
@@ -531,32 +532,33 @@ async def start_meeting(req: StartRequest):
 
 @router.post("/stop")
 async def stop_meeting():
-    if not session.active:
-        return {"error": "No active meeting"}
-
     with session._lock:
+        if not session.active:
+            return {"error": "No active meeting"}
         mid = session.meeting_id
         segs = session.segments[:]
         duration = round(time.time() - session.start_time, 1)
+        summary_lang = session._summary_language
+        groq_key = session._groq_api_key or Config.GROQ_API_KEY
+        # Capture refs under lock so they can't be nulled by a concurrent reset
+        capture = session.capture
+        transcriber = session.transcriber
+        wasapi = getattr(session, '_wasapi', None)
 
     try:
-        session.capture.stop()
-        session.transcriber.stop()
-        # Stop WASAPI if it was started
-        wasapi = getattr(session, '_wasapi', None)
+        if capture:
+            capture.stop()
+        if transcriber:
+            transcriber.stop()
         if wasapi:
             wasapi.stop()
-            session._wasapi = None
+            with session._lock:
+                session._wasapi = None
     except Exception as e:
         logger.warning(f"Error stopping capture/transcriber: {e}")
 
     # Build raw transcript text (with timestamps + speakers for better analysis)
     raw_transcript = build_raw_transcript(segs)
-
-    # Get summary language and API key from session
-    with session._lock:
-        summary_lang = session._summary_language
-        groq_key = session._groq_api_key or Config.GROQ_API_KEY
 
     # Analyze with Groq LLM (if API key is available)
     analysis = {}
@@ -618,6 +620,15 @@ async def stop_meeting():
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 import re
+
+def _safe_json(raw: str | None):
+    """Parse JSON safely, returning None on corruption."""
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
 
 def _generate_title(analysis: dict, start_time: float) -> str:
     """Generate meeting title as YYYY-MM-DD_HH-MM_<short_summary>."""

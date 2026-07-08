@@ -160,15 +160,20 @@ class Transcriber:
         # Prepend overlap from previous chunk for context
         if len(self._overlap_buffer) > 0:
             audio_with_overlap = np.concatenate([self._overlap_buffer, audio])
-            offset = (self._total_samples - len(self._overlap_buffer)) / self.queue.sample_rate
+            overlap_offset = (self._total_samples - len(self._overlap_buffer)) / self.queue.sample_rate
         else:
             audio_with_overlap = audio
-            offset = self._total_samples / self.queue.sample_rate
+            overlap_offset = None
 
         # Preprocess: high-pass, normalize, noise gate
         audio_with_overlap = self._preprocessor.process(audio_with_overlap)
 
-        segments = self._transcribe(audio_with_overlap, offset)
+        segments = self._transcribe(audio_with_overlap, overlap_offset or (self._total_samples / self.queue.sample_rate))
+
+        # Skip segments that fall in the overlap region (already transcribed)
+        if overlap_offset is not None:
+            new_audio_start = self._total_samples / self.queue.sample_rate
+            segments = [s for s in segments if s.start >= new_audio_start]
 
         # Save the tail of this chunk as overlap for the next batch
         if len(audio) > self._overlap_samples:

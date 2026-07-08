@@ -23,14 +23,12 @@ class ConnectionManager:
 
     async def broadcast(self, payload: dict):
         msg = json.dumps(payload)
-        dead = []
-        for ws in self._connections:
+        # Iterate over a snapshot to avoid mutation during iteration
+        for ws in list(self._connections):
             try:
                 await ws.send_text(msg)
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self._connections.remove(ws)
+                self.disconnect(ws)
 
 
 manager = ConnectionManager()

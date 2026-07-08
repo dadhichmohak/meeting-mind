@@ -2,6 +2,20 @@
 
 AI-powered second brain for your busy schedule & meetings. Records, transcribes, and analyzes meetings in real-time using Whisper + Groq LLM.
 
+## Recent Updates
+
+- **Production-ready API URLs** — Frontend uses relative URLs with Vite proxy in dev; set `VITE_API_URL` for production builds
+- **WebSocket reconnection backoff** — Exponential backoff (1s → 30s cap) prevents network flooding when backend is down
+- **Thread-safe WebSocket broadcast** — Fixed race condition where concurrent connections could crash the broadcast loop
+- **Session state race conditions fixed** — `session.active` and resource references now read/write under lock; no more crashes from concurrent start/stop/reset
+- **Duplicate transcript segments eliminated** — Overlap region is now skipped during transcription, preventing repeated text
+- **Mic device selection works** — Selected microphone is now correctly passed to the backend
+- **Migration auto-stamp** — Existing databases without Alembic tracking are automatically stamped to head on startup
+- **Path traversal prevention** — Upload filenames are sanitized to prevent writing outside the meetings directory
+- **Health check caching** — Groq API health check cached for 5 minutes, reducing API calls
+- **LLM calls outside DB sessions** — Network I/O no longer holds database connections open
+- **Timestamps handle >1hr** — `format_timestamp` now shows `h:mm:ss` for meetings over an hour
+
 ## Features
 
 - **Live Transcription** — Real-time speech-to-text via faster-whisper (~0.5s latency)
@@ -69,6 +83,12 @@ npm run dev
 ```
 
 Open http://localhost:5173
+
+For production builds, set the backend URL:
+
+```bash
+VITE_API_URL=https://your-backend-url npm run build
+```
 
 ### 3. App Audio Capture (Windows)
 

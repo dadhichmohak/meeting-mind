@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useMeetingStore } from "../store/meetingStore";
 import { usePreferences } from "../store/usePreferences";
-
-const API = "http://127.0.0.1:8765";
+import { apiUrl } from "../config";
 
 export function useMeeting() {
   const store = useMeetingStore();
@@ -12,7 +11,7 @@ export function useMeeting() {
 
   const fetchDevices = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/meetings/devices`);
+      const r = await fetch(apiUrl("/meetings/devices"));
       const d = await r.json();
       store.setDevices(d.devices);
       if (d.apps) store.setAudioApps(d.apps);
@@ -23,7 +22,7 @@ export function useMeeting() {
 
   const refreshApps = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/meetings/devices`);
+      const r = await fetch(apiUrl("/meetings/devices"));
       const d = await r.json();
       if (d.apps) store.setAudioApps(d.apps);
     } catch { /* silently fail */ }
@@ -45,7 +44,7 @@ export function useMeeting() {
         summary_language: prefs.summaryLang,
         groq_api_key: prefs.groqApiKey || undefined,
       };
-      const r = await fetch(`${API}/meetings/start`, {
+      const r = await fetch(apiUrl("/meetings/start"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -53,8 +52,8 @@ export function useMeeting() {
       const d = await r.json();
       if (d.error) {
         if (d.error === "Meeting already active") {
-          await fetch(`${API}/meetings/reset`, { method: "POST" });
-          const r2 = await fetch(`${API}/meetings/start`, {
+          await fetch(apiUrl("/meetings/reset"), { method: "POST" });
+          const r2 = await fetch(apiUrl("/meetings/start"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
@@ -92,7 +91,7 @@ export function useMeeting() {
     if (timerRef.current) clearInterval(timerRef.current);
     if (appsTimerRef.current) clearInterval(appsTimerRef.current);
     try {
-      const r = await fetch(`${API}/meetings/stop`, { method: "POST" });
+      const r = await fetch(apiUrl("/meetings/stop"), { method: "POST" });
       const result = await r.json();
 
       if (result.analysis) {

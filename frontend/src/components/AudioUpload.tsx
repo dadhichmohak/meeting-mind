@@ -1,7 +1,6 @@
 import { useState, useRef } from "react";
 import { useMeetingStore } from "../store/meetingStore";
-
-const API = "http://127.0.0.1:8765";
+import { apiUrl } from "../config";
 
 interface UploadResult {
   meeting_id: string;
@@ -56,7 +55,7 @@ export function AudioUpload() {
       formData.append("language", "en");
 
       setProgress("Transcribing audio...");
-      const r = await fetch(`${API}/upload`, { method: "POST", body: formData });
+      const r = await fetch(apiUrl("/upload"), { method: "POST", body: formData });
       if (!r.ok) {
         const err = await r.json();
         throw new Error(err.detail || "Upload failed");

@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useMeetingStore } from "../store/meetingStore";
-
-const API = "http://127.0.0.1:8765";
+import { apiUrl } from "../config";
 
 interface MeetingSummary {
   id: string;
@@ -104,7 +103,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
 
   const fetchMeetings = async () => {
     try {
-      const r = await fetch(`${API}/meetings/list`);
+      const r = await fetch(apiUrl("/meetings/list"));
       const data = await r.json();
       setMeetings(data.meetings || []);
     } catch { /* silently fail */ }
@@ -113,7 +112,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
   const fetchDetail = async (id: string) => {
     setLoading(true);
     try {
-      const r = await fetch(`${API}/meetings/${id}`);
+      const r = await fetch(apiUrl(`/meetings/${id}`));
       const data = await r.json();
       setSelected(data);
       setEditTitle(data.title || "");
@@ -128,7 +127,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
     if (!confirm("Delete this meeting transcript?")) return;
     setDeleting(id);
     try {
-      await fetch(`${API}/meetings/${id}`, { method: "DELETE" });
+      await fetch(apiUrl(`/meetings/${id}`), { method: "DELETE" });
       setMeetings((prev) => prev.filter((m) => m.id !== id));
       if (selected?.id === id) setSelected(null);
     } catch { /* silently fail */ }
@@ -142,7 +141,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
     }
     setSearching(true);
     try {
-      const r = await fetch(`${API}/meetings/search?q=${encodeURIComponent(q)}`);
+      const r = await fetch(apiUrl(`/meetings/search?q=${encodeURIComponent(q)}`));
       const data = await r.json();
       setSearchResults(data.results || []);
     } catch { /* silently fail */ }
@@ -153,7 +152,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
     if (!selected) return;
     setSaving(true);
     try {
-      await fetch(`${API}/meetings/${selected.id}`, {
+      await fetch(apiUrl(`/meetings/${selected.id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: editTitle }),
@@ -171,7 +170,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
     if (!selected) return;
     setSaving(true);
     try {
-      await fetch(`${API}/meetings/${selected.id}`, {
+      await fetch(apiUrl(`/meetings/${selected.id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ notes: editNotes }),
@@ -182,17 +181,7 @@ export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: str
     setSaving(false);
   };
 
-  useEffect(() => { fetchMeetings(); }, [status]);
-
-  // Re-fetch when component mounts or user navigates back from detail
-  useEffect(() => {
-    fetchMeetings();
-  }, []);
-
-  // Re-fetch every time user comes back to list view (selected becomes null)
-  useEffect(() => {
-    if (!selected) fetchMeetings();
-  }, [selected]);
+  useEffect(() => { fetchMeetings(); }, [status, selected]);
 
   useEffect(() => {
     const t = setTimeout(() => { doSearch(query); }, 300);

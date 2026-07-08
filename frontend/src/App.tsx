@@ -6,8 +6,7 @@ import { useTheme } from "./hooks/useTheme";
 import { useMeeting } from "./hooks/useMeeting";
 import { MeetingHistory } from "./components/MeetingHistory";
 import { Settings } from "./components/Settings";
-
-const API = "http://127.0.0.1:8765";
+import { apiUrl } from "./config";
 
 type AudioSource = "mic" | "system" | "both";
 
@@ -19,7 +18,7 @@ function fmtTime(s: number): string {
 
 export default function App() {
   useWebSocket();
-  const { status, segments, duration } = useMeetingStore();
+  const { status, segments, duration, selectedMicDevice } = useMeetingStore();
   const prefs = usePreferences();
   const { toggleTheme, isDark } = useTheme();
   const { startMeeting, stopMeeting } = useMeeting();
@@ -55,7 +54,7 @@ export default function App() {
   const isLoading = status === "loading" || status === "stopping";
 
   useEffect(() => {
-    fetch(`${API}/meetings/devices`)
+    fetch(apiUrl("/meetings/devices"))
       .then(r => r.json())
       .then(setDevices)
       .catch(() => {});
@@ -87,7 +86,7 @@ export default function App() {
 
   const handleStart = async () => {
     const enableLoopback = audioSource === "system" || audioSource === "both";
-    const micDevice = audioSource === "system" ? undefined : undefined;
+    const micDevice = audioSource === "system" ? undefined : selectedMicDevice ?? undefined;
     const title = meetingTitle.trim() || undefined;
     await startMeeting({
       enable_loopback: enableLoopback,
@@ -110,7 +109,7 @@ export default function App() {
       const transcriptText = segments.map((s) => s.text).join(" ");
       const history = askMessages.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n");
       const fullPrompt = history ? `${history}\nUser: ${q}` : q;
-      const r = await fetch(`${API}/meetings/ask`, {
+      const r = await fetch(apiUrl("/meetings/ask"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -147,7 +146,7 @@ export default function App() {
     try {
       const params = new URLSearchParams({ q, limit: "5" });
       if (selectedMeetingId) params.set("meeting_id", selectedMeetingId);
-      const r = await fetch(`${API}/meetings/search?${params}`);
+      const r = await fetch(apiUrl(`/meetings/search?${params}`));
       const data = await r.json();
       setSearchResults(data.results || []);
       setSearchLlmAnswer(data.llm_answer || null);
@@ -172,14 +171,14 @@ export default function App() {
     }
     setIsSearching(true);
     try {
-      const r = await fetch(`${API}/meetings/search?q=today&limit=3`);
+      const r = await fetch(apiUrl("/meetings/search?q=today&limit=3"));
       const data = await r.json();
       if (data.results && data.results.length > 0) {
         setSearchQuery("today");
         setSearchResults(data.results);
         setShowSearch(true);
       } else {
-        const r2 = await fetch(`${API}/meetings/search?q=action+items+decisions&limit=3`);
+        const r2 = await fetch(apiUrl("/meetings/search?q=action+items+decisions&limit=3"));
         const d2 = await r2.json();
         setSearchQuery("action items decisions");
         setSearchResults(d2.results || []);
@@ -201,7 +200,7 @@ export default function App() {
       if (prefs.groqApiKey) formData.append("groq_api_key", prefs.groqApiKey);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 300000); // 5 min timeout
-      const r = await fetch(`${API}/upload`, {
+      const r = await fetch(apiUrl("/upload"), {
         method: "POST",
         body: formData,
         signal: controller.signal,
@@ -213,7 +212,7 @@ export default function App() {
       } else {
         setUploadResult(data);
         // Re-fetch meeting list so history updates
-        fetch(`${API}/meetings/list`).then(res => res.json()).catch(() => {});
+        fetch(apiUrl("/meetings/list")).then(res => res.json()).catch(() => {});
       }
     } catch (e: any) {
       if (e.name === "AbortError") {
