@@ -27,28 +27,53 @@ class WASAPICapture:
         self.vad = vad
         self.sample_rate = sample_rate
         self.chunk_size = int(sample_rate * chunk_duration_ms / 1000)
+        # Device-native rate/channels are discovered in start(); until then we
+        # assume stereo (most loopback devices are 2-channel) so the first
+        # callback deinterleaves correctly even if start() failed.
+        self._device_rate: int = sample_rate
+        self._channels: int = 2
         self._stream = None
         self._p = None
         self._running = False
         self._lock = threading.Lock()
 
+    def _to_mono(self, audio: np.ndarray) -> np.ndarray:
+        """Deinterleave and average multi-channel audio down to mono."""
+        if self._channels <= 1:
+            return audio
+        if audio.shape[0] % self._channels != 0:
+            # Truncate any partial frame so reshape is clean.
+            audio = audio[: (audio.shape[0] // self._channels) * self._channels]
+        if audio.shape[0] == 0:
+            return audio
+        return audio.reshape(-1, self._channels).mean(axis=1)
+
+    def _resample(self, audio: np.ndarray) -> np.ndarray:
+        """Resample from the device rate to the target (queue) rate via
+        linear interpolation. Linear is adequate for 16 kHz ASR input."""
+        src_rate = self._device_rate
+        dst_rate = self.sample_rate
+        if src_rate == dst_rate or audio.shape[0] == 0:
+            return audio
+        n_out = int(round(audio.shape[0] * dst_rate / src_rate))
+        if n_out < 1:
+            return audio
+        x_old = np.linspace(0, audio.shape[0] - 1, num=audio.shape[0])
+        x_new = np.linspace(0, audio.shape[0] - 1, num=n_out)
+        return np.interp(x_new, x_old, audio).astype(np.float32)
+
     def _callback(self, in_data, frame_count, time_info, status):
         if status:
             logger.debug(f"WASAPI status: {status}")
         try:
-            audio_np = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+            audio = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+            audio = self._to_mono(audio)
+            audio = self._resample(audio)
 
-            if audio_np.shape[0] % 2 == 0:
-                audio_np = audio_np[::2]
-
-            if self.queue.sample_rate != 48000:
-                if len(audio_np) >= 3:
-                    audio_np = audio_np[::3]
-
-            if self.vad and not self.vad.is_speech(audio_np):
+            if self.vad and not self.vad.is_speech(audio):
                 return (None, 0)
 
-            self.queue.put(audio_np)
+            self.queue.put(audio)
         except Exception as e:
             logger.debug(f"WASAPI callback error: {e}")
         return (None, 0)
@@ -94,10 +119,12 @@ class WASAPICapture:
 
             import pyaudiowpatch as pyaudio
 
+            self._device_rate = int(device_info['defaultSampleRate'])
+            self._channels = int(device_info.get('maxInputChannels', 2))
             self._stream = self._p.open(
                 format=pyaudio.paInt16,
-                channels=device_info.get('maxInputChannels', 2),
-                rate=int(device_info['defaultSampleRate']),
+                channels=self._channels,
+                rate=self._device_rate,
                 input=True,
                 input_device_index=device_info['index'],
                 frames_per_buffer=self.chunk_size,

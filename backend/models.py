@@ -5,7 +5,7 @@ Meeting  → one recording session
 TranscriptSegment → one transcribed utterance within a meeting
 Note     → free-form user notes attached to a meeting
 """
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import (
     Column,
@@ -21,8 +21,8 @@ from sqlalchemy.orm import relationship
 from backend.database import Base
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+def _localnow() -> datetime:
+    return datetime.now()
 
 
 class Meeting(Base):
@@ -31,11 +31,11 @@ class Meeting(Base):
     id = Column(String(36), primary_key=True)  # 8-char uuid (e.g. "A1B2C3D4")
     title = Column(String(255), nullable=True)
     status = Column(String(20), default="recording")  # recording | completed
-    started_at = Column(DateTime, default=_utcnow)
+    started_at = Column(DateTime, default=_localnow)
     ended_at = Column(DateTime, nullable=True)
     duration_seconds = Column(Float, default=0.0)
     analysis = Column(Text, nullable=True)  # JSON string from Groq analysis
-    created_at = Column(DateTime, default=_utcnow)
+    created_at = Column(DateTime, default=_localnow)
 
     segments = relationship(
         "TranscriptSegment",
@@ -72,7 +72,7 @@ class Note(Base):
         String(36), ForeignKey("meetings.id", ondelete="CASCADE"), index=True
     )
     content = Column(Text, default="")
-    created_at = Column(DateTime, default=_utcnow)
-    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    created_at = Column(DateTime, default=_localnow)
+    updated_at = Column(DateTime, default=_localnow, onupdate=_localnow)
 
     meeting = relationship("Meeting", back_populates="notes")

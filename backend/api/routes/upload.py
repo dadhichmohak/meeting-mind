@@ -5,7 +5,8 @@ import json
 import uuid
 import tempfile
 import os
-from datetime import datetime, timezone
+import re
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
@@ -18,11 +19,30 @@ from backend.models import Meeting, TranscriptSegment as TranscriptSegmentRow
 from backend.whisper.transcriber import Transcriber, TranscriptSegment
 from backend.llm.groq_engine import GroqEngine
 from backend.llm.analyzer import MeetingAnalyzer
+from backend.utils.transcript import build_raw_transcript
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
 ALLOWED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mp4", ".aac", ".wma"}
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+
+
+def _generate_title(analysis: dict, start_time: datetime = None) -> str:
+    """Generate meeting title as YYYY-MM-DD_HH-MM_<short_summary>."""
+    now = start_time or datetime.now()
+    date_str = now.strftime("%Y-%m-%d_%H-%M")
+    summary = ""
+    if analysis and isinstance(analysis, dict):
+        raw = analysis.get("summary", "")
+        if isinstance(raw, list):
+            raw = raw[0] if raw else ""
+        if isinstance(raw, str) and raw.strip():
+            summary = raw.strip()
+    if not summary:
+        summary = "meeting"
+    summary = summary[:60]
+    summary = re.sub(r"[^a-zA-Z0-9]+", "_", summary).strip("_").lower()
+    return f"{date_str}_{summary}"
 
 
 class UploadResponse(BaseModel):
@@ -66,17 +86,18 @@ def _transcribe_file(audio_path: str, model_size: str = "base", language: str = 
     return results, info.duration
 
 
-def _save_upload_transcript(mid: str, filename: str, segments: list[TranscriptSegment], duration: float, analysis: dict = None) -> str:
+def _save_upload_transcript(mid: str, filename: str, segments: list[TranscriptSegment], duration: float, analysis: dict = None, title: str = None) -> str:
     """Save uploaded transcript as markdown."""
     Path("meetings").mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = f"meetings/upload_{ts}_{mid}.md"
+    display_title = title or filename or mid
+    path = f"meetings/upload_{ts}_{mid}_{display_title}.md"
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# Meeting — {filename}\n")
+        f.write(f"# {display_title}\n")
         f.write(f"**ID:** {mid}\n")
         f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
-        f.write(f"**Source:** Uploaded file\n")
+        f.write(f"**Source:** Uploaded file ({filename})\n")
         f.write(f"**Duration:** {duration:.1f}s\n\n---\n\n")
 
         if analysis and not analysis.get("error"):
@@ -123,6 +144,8 @@ async def upload_audio(
     file: UploadFile = File(...),
     model_size: str = "base",
     language: str = "en",
+    summary_language: str = "en",
+    groq_api_key: str | None = None,
 ):
     """Upload an audio file to transcribe and analyze."""
     # Validate file extension
@@ -149,16 +172,17 @@ async def upload_audio(
         # Transcribe
         segments, duration = _transcribe_file(tmp_path, model_size=model_size, language=language)
 
-        # Build raw transcript
-        raw_transcript = "\n".join([s.text for s in segments])
+        # Build raw transcript (with timestamps + speakers for better analysis)
+        raw_transcript = build_raw_transcript(segments)
 
         # Analyze with Groq if we have content
+        api_key = groq_api_key or Config.GROQ_API_KEY
         analysis = {}
-        if len(segments) > 0 and Config.GROQ_API_KEY:
+        if len(segments) > 0 and api_key:
             try:
-                llm = GroqEngine()
+                llm = GroqEngine(api_key=api_key)
                 analyzer = MeetingAnalyzer(llm)
-                analysis = analyzer.analyze(raw_transcript)
+                analysis = analyzer.analyze(raw_transcript, output_language=summary_language)
                 logger.info(f"Upload analysis complete: {list(analysis.keys())}")
             except Exception as e:
                 logger.warning(f"Upload analysis failed: {e}")
@@ -168,17 +192,20 @@ async def upload_audio(
         else:
             analysis = {"info": "GROQ_API_KEY not set — skipping analysis."}
 
+        # Generate meeting title from analysis summary
+        meeting_title = _generate_title(analysis)
+
         # Save transcript file
-        _save_upload_transcript(mid, file.filename or "unknown", segments, duration, analysis)
+        _save_upload_transcript(mid, file.filename or "unknown", segments, duration, analysis, title=meeting_title)
 
         # Persist to database
         with SessionLocal() as db:
             db.add(Meeting(
                 id=mid,
-                title=file.filename,
+                title=meeting_title,
                 status="completed",
-                started_at=datetime.now(timezone.utc),
-                ended_at=datetime.now(timezone.utc),
+                started_at=datetime.now(),
+                ended_at=datetime.now(),
                 duration_seconds=duration,
                 analysis=json.dumps(analysis, ensure_ascii=False) if analysis else None,
             ))

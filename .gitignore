@@ -1,0 +1,26 @@
+# Environment / secrets
+.env
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+.venv
+venv
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Logs / runtime artifacts
+logs/
+exports/
+
+# Frontend build
+frontend/dist/
+node_modules/
+
+# Markdown files (except README)
+*.md
+!README.md

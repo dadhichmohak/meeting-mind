@@ -3,17 +3,21 @@ POST /meetings/start   — start capture + transcription
 POST /meetings/stop    — stop and save transcript
 GET  /meetings/status  — current session info
 GET  /meetings/devices — list audio input devices
+GET  /meetings/search  — full-text search across meetings
+PATCH /meetings/{id}   — edit meeting title / notes
 """
 import asyncio
 import json
+import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from loguru import logger
 from pydantic import BaseModel
+from typing import Optional
 
 from backend.config import Config
 from backend.database import SessionLocal, init_db
@@ -26,6 +30,7 @@ from backend.whisper.transcriber import Transcriber, TranscriptSegment
 from backend.api.websocket import manager, push_segment, push_status
 from backend.llm.groq_engine import GroqEngine
 from backend.llm.analyzer import MeetingAnalyzer
+from backend.utils.transcript import build_raw_transcript
 
 # Try importing WASAPI capture (Windows only)
 try:
@@ -49,15 +54,21 @@ class _Session:
     capture: AudioCapture | None = None
     transcriber: Transcriber | None = None
     _loop: asyncio.AbstractEventLoop | None = None
+    _lock: threading.Lock = threading.Lock()
+    _summary_language: str = "en"
+    _groq_api_key: str | None = None
 
     def reset(self):
-        self.active = False
-        self.meeting_id = ""
-        self.start_time = 0.0
-        self.segments = []
-        self.capture = None
-        self.transcriber = None
-        self._loop = None
+        with self._lock:
+            self.active = False
+            self.meeting_id = ""
+            self.start_time = 0.0
+            self.segments = []
+            self.capture = None
+            self.transcriber = None
+            self._loop = None
+            self._summary_language = "en"
+            self._groq_api_key = None
 
 
 session = _Session()
@@ -74,7 +85,9 @@ class StartRequest(BaseModel):
     use_wasapi: bool = True
     model_size: str = "base"
     language: str = "en"
+    summary_language: str = "en"
     vad_enabled: bool = True
+    groq_api_key: str | None = None
 
 
 class StopResponse(BaseModel):
@@ -99,14 +112,15 @@ async def list_devices():
 
 @router.get("/status")
 async def get_status():
-    if not session.active:
-        return {"active": False}
-    return {
-        "active": True,
-        "meeting_id": session.meeting_id,
-        "duration_seconds": round(time.time() - session.start_time, 1),
-        "segment_count": len(session.segments),
-    }
+    with session._lock:
+        if not session.active:
+            return {"active": False}
+        return {
+            "active": True,
+            "meeting_id": session.meeting_id,
+            "duration_seconds": round(time.time() - session.start_time, 1),
+            "segment_count": len(session.segments),
+        }
 
 
 @router.post("/reset")
@@ -142,6 +156,130 @@ async def list_meetings(limit: int = 50, offset: int = 0):
         }
 
 
+@router.get("/search")
+async def search_meetings(q: str = "", limit: int = 20):
+    """Full-text search across meeting titles and transcript segments."""
+    if not q.strip():
+        return {"results": [], "query": q}
+
+    with SessionLocal() as db:
+        # Search in meeting titles
+        title_matches = (
+            db.query(Meeting)
+            .filter(Meeting.title.ilike(f"%{q}%"))
+            .order_by(Meeting.started_at.desc())
+            .limit(limit)
+            .all()
+        )
+        title_ids = {m.id for m in title_matches}
+
+        # Search in transcript segments
+        segment_matches = (
+            db.query(TranscriptSegmentRow)
+            .filter(TranscriptSegmentRow.text.ilike(f"%{q}%"))
+            .order_by(TranscriptSegmentRow.id.desc())
+            .limit(limit * 3)
+            .all()
+        )
+
+        # Group segments by meeting_id, preserving order
+        seg_by_meeting: dict[str, list] = {}
+        for seg in segment_matches:
+            if seg.meeting_id not in seg_by_meeting:
+                seg_by_meeting[seg.meeting_id] = []
+            if len(seg_by_meeting[seg.meeting_id]) < 3:
+                seg_by_meeting[seg.meeting_id].append({
+                    "text": seg.text,
+                    "start_sec": seg.start_sec,
+                    "speaker": seg.speaker,
+                })
+
+        # Fetch full meeting objects for segment matches
+        seg_meeting_ids = [mid for mid in seg_by_meeting if mid not in title_ids]
+        seg_meetings = []
+        if seg_meeting_ids:
+            seg_meetings = (
+                db.query(Meeting)
+                .filter(Meeting.id.in_(seg_meeting_ids))
+                .order_by(Meeting.started_at.desc())
+                .limit(limit)
+                .all()
+            )
+
+        # Combine results: title matches first, then segment matches
+        results = []
+        seen_ids = set()
+
+        for m in title_matches:
+            if m.id in seen_ids:
+                continue
+            seen_ids.add(m.id)
+            results.append({
+                "id": m.id,
+                "title": m.title,
+                "status": m.status,
+                "started_at": m.started_at.isoformat() if m.started_at else None,
+                "duration_seconds": m.duration_seconds,
+                "segment_count": len(m.segments),
+                "match_type": "title",
+                "matched_segments": [],
+            })
+
+        for m in seg_meetings:
+            if m.id in seen_ids:
+                continue
+            seen_ids.add(m.id)
+            results.append({
+                "id": m.id,
+                "title": m.title,
+                "status": m.status,
+                "started_at": m.started_at.isoformat() if m.started_at else None,
+                "duration_seconds": m.duration_seconds,
+                "segment_count": len(m.segments),
+                "match_type": "transcript",
+                "matched_segments": seg_by_meeting.get(m.id, []),
+            })
+
+        return {"results": results[:limit], "query": q}
+
+
+class EditMeetingRequest(BaseModel):
+    title: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.patch("/{meeting_id}")
+async def edit_meeting(meeting_id: str, req: EditMeetingRequest):
+    """Edit meeting title and/or notes."""
+    with SessionLocal() as db:
+        meeting = db.get(Meeting, meeting_id)
+        if not meeting:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+
+        if req.title is not None:
+            meeting.title = req.title
+
+        if req.notes is not None:
+            # Upsert the note
+            note = db.query(Note).filter(Note.meeting_id == meeting_id).first()
+            if note:
+                note.content = req.notes
+                note.updated_at = datetime.now()
+            else:
+                db.add(Note(
+                    meeting_id=meeting_id,
+                    content=req.notes,
+                ))
+
+        db.commit()
+
+        return {
+            "id": meeting.id,
+            "title": meeting.title,
+            "notes": req.notes,
+        }
+
+
 @router.get("/{meeting_id}")
 async def get_meeting(meeting_id: str):
     """Fetch a single meeting with its full transcript + analysis."""
@@ -149,6 +287,8 @@ async def get_meeting(meeting_id: str):
         m = db.get(Meeting, meeting_id)
         if not m:
             raise HTTPException(status_code=404, detail="Meeting not found")
+        # Fetch notes
+        note = db.query(Note).filter(Note.meeting_id == meeting_id).first()
         return {
             "id": m.id,
             "title": m.title,
@@ -157,6 +297,7 @@ async def get_meeting(meeting_id: str):
             "ended_at": m.ended_at.isoformat() if m.ended_at else None,
             "duration_seconds": m.duration_seconds,
             "analysis": json.loads(m.analysis) if m.analysis else None,
+            "notes": note.content if note else "",
             "segments": [
                 {
                     "sequence": s.sequence,
@@ -200,7 +341,9 @@ async def start_meeting(req: StartRequest):
     session.meeting_id = str(uuid.uuid4())[:8].upper()
     session.start_time = time.time()
     session.segments = []
-    session._loop = asyncio.get_event_loop()
+    session._loop = asyncio.get_running_loop()
+    session._summary_language = req.summary_language
+    session._groq_api_key = req.groq_api_key or None
 
     # Persist the meeting row
     with SessionLocal() as db:
@@ -208,7 +351,7 @@ async def start_meeting(req: StartRequest):
             id=session.meeting_id,
             title=req.title,
             status="recording",
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(),
         ))
         db.commit()
 
@@ -239,14 +382,17 @@ async def start_meeting(req: StartRequest):
     )
 
     def on_segment(seg: TranscriptSegment):
-        session.segments.append(seg)
+        with session._lock:
+            session.segments.append(seg)
+            seg_count = len(session.segments)
+            meeting_id = session.meeting_id
         # Persist each segment as it arrives (separate session per write
         # so the Whisper thread never shares a session with the API).
         try:
             with SessionLocal() as db:
                 db.add(TranscriptSegmentRow(
-                    meeting_id=session.meeting_id,
-                    sequence=len(session.segments),
+                    meeting_id=meeting_id,
+                    sequence=seg_count,
                     text=seg.text,
                     speaker=seg.speaker,
                     start_sec=seg.start,
@@ -264,7 +410,8 @@ async def start_meeting(req: StartRequest):
         stream_queue=q,
         model_size=req.model_size,
         language=req.language,
-        buffer_duration_s=3.0,
+        buffer_duration_s=4.0,
+        overlap_duration_s=1.5,
         on_segment=on_segment,
     )
     session.transcriber.load_model()
@@ -287,7 +434,8 @@ async def start_meeting(req: StartRequest):
         session.capture.start(mic=True, loopback=req.enable_loopback)
 
     session.transcriber.start()
-    session.active = True
+    with session._lock:
+        session.active = True
 
     await push_status("recording", session.meeting_id)
     logger.info(f"Meeting {session.meeting_id} started")
@@ -299,9 +447,10 @@ async def stop_meeting():
     if not session.active:
         return {"error": "No active meeting"}
 
-    mid = session.meeting_id
-    segs = session.segments[:]
-    duration = round(time.time() - session.start_time, 1)
+    with session._lock:
+        mid = session.meeting_id
+        segs = session.segments[:]
+        duration = round(time.time() - session.start_time, 1)
 
     try:
         session.capture.stop()
@@ -314,16 +463,21 @@ async def stop_meeting():
     except Exception as e:
         logger.warning(f"Error stopping capture/transcriber: {e}")
 
-    # Build raw transcript text
-    raw_transcript = "\n".join([f"{seg.text}" for seg in segs])
+    # Build raw transcript text (with timestamps + speakers for better analysis)
+    raw_transcript = build_raw_transcript(segs)
+
+    # Get summary language and API key from session
+    with session._lock:
+        summary_lang = session._summary_language
+        groq_key = session._groq_api_key or Config.GROQ_API_KEY
 
     # Analyze with Groq LLM (if API key is available)
     analysis = {}
-    if len(segs) > 0 and Config.GROQ_API_KEY:
+    if len(segs) > 0 and groq_key:
         try:
-            llm = GroqEngine()
+            llm = GroqEngine(api_key=groq_key)
             analyzer = MeetingAnalyzer(llm)
-            analysis = analyzer.analyze(raw_transcript)
+            analysis = analyzer.analyze(raw_transcript, output_language=summary_lang)
             logger.info(f"Analysis complete: {list(analysis.keys())}")
         except Exception as e:
             logger.warning(f"Analysis failed: {e}")
@@ -333,23 +487,27 @@ async def stop_meeting():
     else:
         analysis = {"info": "GROQ_API_KEY not set — skipping analysis. Set it in .env to enable."}
 
+    # Generate meeting title from analysis summary
+    meeting_title = _generate_title(analysis, session.start_time)
+
     # Save transcript with analysis (Markdown export artifact)
     path = ""
     try:
-        path = _save_transcript(mid, segs, duration, analysis)
+        path = _save_transcript(mid, segs, duration, analysis, title=meeting_title)
     except Exception as e:
         logger.warning(f"Failed to save transcript file: {e}")
 
-    # Persist analysis + finalize the meeting row
+    # Persist analysis + title + finalize the meeting row
     analysis_json = json.dumps(analysis, ensure_ascii=False) if analysis else None
     try:
         with SessionLocal() as db:
             meeting = db.get(Meeting, mid)
             if meeting:
                 meeting.status = "completed"
-                meeting.ended_at = datetime.now(timezone.utc)
+                meeting.ended_at = datetime.now()
                 meeting.duration_seconds = duration
                 meeting.analysis = analysis_json
+                meeting.title = meeting_title
                 db.commit()
     except Exception as e:
         logger.warning(f"Failed to finalize meeting row: {e}")
@@ -370,13 +528,36 @@ async def stop_meeting():
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _save_transcript(mid: str, segments: list[TranscriptSegment], duration: float, analysis: dict = None) -> str:
+import re
+
+def _generate_title(analysis: dict, start_time: float) -> str:
+    """Generate meeting title as YYYY-MM-DD_HH-MM_<short_summary>."""
+    now = datetime.fromtimestamp(start_time)
+    date_str = now.strftime("%Y-%m-%d_%H-%M")
+    summary = ""
+    if analysis and isinstance(analysis, dict):
+        raw = analysis.get("summary", "")
+        if isinstance(raw, list):
+            raw = raw[0] if raw else ""
+        if isinstance(raw, str) and raw.strip():
+            summary = raw.strip()
+    if not summary:
+        summary = "meeting"
+    # Clean: take first ~60 chars, replace non-alphanum with underscore, collapse
+    summary = summary[:60]
+    summary = re.sub(r"[^a-zA-Z0-9]+", "_", summary).strip("_").lower()
+    return f"{date_str}_{summary}"
+
+
+def _save_transcript(mid: str, segments: list[TranscriptSegment], duration: float, analysis: dict = None, title: str = None) -> str:
     Path("meetings").mkdir(exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = f"meetings/{ts}_{mid}.md"
+    display_title = title or mid
+    path = f"meetings/{ts}_{mid}_{display_title}.md"
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# Meeting — {mid}\n")
+        f.write(f"# {display_title}\n")
+        f.write(f"**ID:** {mid}\n")
         f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
         f.write(f"**Duration:** {duration}s\n\n---\n\n")
 

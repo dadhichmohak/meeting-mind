@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useMeetingStore } from "../store/meetingStore";
+import { usePreferences } from "../store/usePreferences";
 
 const API = "http://127.0.0.1:8765";
 
 export function useMeeting() {
   const store = useMeetingStore();
+  const prefs = usePreferences();
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const appsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -15,7 +17,7 @@ export function useMeeting() {
       store.setDevices(d.devices);
       if (d.apps) store.setAudioApps(d.apps);
     } catch {
-      store.setError("Cannot reach backend — is it running?");
+      store.setError("Cannot reach backend");
     }
   }, []);
 
@@ -24,46 +26,38 @@ export function useMeeting() {
       const r = await fetch(`${API}/meetings/devices`);
       const d = await r.json();
       if (d.apps) store.setAudioApps(d.apps);
-    } catch {
-      // silently fail
-    }
+    } catch { /* silently fail */ }
   }, []);
 
-  const startMeeting = useCallback(async () => {
+  const startMeeting = useCallback(async (overrides?: { enable_loopback?: boolean; use_wasapi?: boolean; mic_device?: number }) => {
     store.setStatus("loading");
     store.setError(null);
     try {
+      const enableLoopback = overrides?.enable_loopback ?? prefs.useWasapi;
+      const body = {
+        mic_device: overrides?.mic_device ?? store.selectedMicDevice,
+        loopback_device: store.selectedLoopbackDevice,
+        enable_loopback: enableLoopback,
+        use_wasapi: overrides?.use_wasapi ?? prefs.useWasapi,
+        model_size: "base",
+        language: prefs.transcriptionLang,
+        summary_language: prefs.summaryLang,
+        vad_enabled: true,
+        groq_api_key: prefs.groqApiKey || undefined,
+      };
       const r = await fetch(`${API}/meetings/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mic_device: store.selectedMicDevice,
-          loopback_device: store.selectedLoopbackDevice,
-          enable_loopback: store.useWasapi,
-          use_wasapi: store.useWasapi,
-          model_size: "base",
-          language: "en",
-          vad_enabled: true,
-        }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (d.error) {
-        // If meeting already active, try to reset first
         if (d.error === "Meeting already active") {
           await fetch(`${API}/meetings/reset`, { method: "POST" });
-          // Retry once
           const r2 = await fetch(`${API}/meetings/start`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              mic_device: store.selectedMicDevice,
-              loopback_device: store.selectedLoopbackDevice,
-              enable_loopback: store.useWasapi,
-              use_wasapi: store.useWasapi,
-              model_size: "base",
-              language: "en",
-              vad_enabled: true,
-            }),
+            body: JSON.stringify(body),
           });
           const d2 = await r2.json();
           if (d2.error) {
@@ -86,14 +80,12 @@ export function useMeeting() {
       timerRef.current = setInterval(() => {
         store.setDuration((useMeetingStore.getState().duration || 0) + 1);
       }, 1000);
-
-      // Refresh app list every 2s while recording
       appsTimerRef.current = setInterval(refreshApps, 2000);
     } catch {
       store.setError("Failed to start meeting");
       store.setStatus("error");
     }
-  }, [store.selectedMicDevice, store.selectedLoopbackDevice, store.useWasapi]);
+  }, [store.selectedMicDevice, store.selectedLoopbackDevice, prefs]);
 
   const stopMeeting = useCallback(async () => {
     store.setStatus("stopping");
@@ -102,13 +94,13 @@ export function useMeeting() {
     try {
       const r = await fetch(`${API}/meetings/stop`, { method: "POST" });
       const result = await r.json();
-      
+
       if (result.analysis) {
         window.dispatchEvent(
           new CustomEvent("meeting-stopped", { detail: { analysis: result.analysis } })
         );
       }
-      
+
       store.setStatus("idle");
       store.setDuration(0);
       return result;

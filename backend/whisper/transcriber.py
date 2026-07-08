@@ -2,6 +2,10 @@
 Pulls chunks from AudioStreamQueue, accumulates a rolling buffer,
 transcribes every N seconds using faster-whisper, fires a callback
 with each TranscriptSegment.
+
+Uses overlapping context between chunks to avoid skipping text
+at boundaries — the last `overlap_duration_s` of audio is carried
+over to the next transcription batch.
 """
 import time
 import threading
@@ -33,6 +37,7 @@ class Transcriber:
         device: str = "cpu",
         compute_type: str = "int8",
         buffer_duration_s: float = 5.0,
+        overlap_duration_s: float = 1.5,
         on_segment=None,
     ):
         self.queue = stream_queue
@@ -41,6 +46,7 @@ class Transcriber:
         self.device = device
         self.compute_type = compute_type
         self.buffer_duration_s = buffer_duration_s
+        self.overlap_duration_s = overlap_duration_s
         self.on_segment = on_segment
 
         self._model: WhisperModel | None = None
@@ -50,6 +56,8 @@ class Transcriber:
         self._buffer_samples = 0
         self._total_samples = 0
         self._target_samples = 0
+        self._overlap_samples = 0
+        self._overlap_buffer: np.ndarray = np.array([], dtype=np.float32)
 
     def load_model(self):
         logger.info(f"Loading Whisper '{self.model_size}' on {self.device}...")
@@ -59,17 +67,20 @@ class Transcriber:
             compute_type=self.compute_type,
         )
         self._target_samples = int(self.buffer_duration_s * self.queue.sample_rate)
-        logger.info("Whisper ready")
+        self._overlap_samples = int(self.overlap_duration_s * self.queue.sample_rate)
+        logger.info(f"Whisper ready (buffer={self.buffer_duration_s}s, overlap={self.overlap_duration_s}s)")
 
-    def _transcribe(self) -> list[TranscriptSegment]:
-        if not self._buffer:
+    # Map composite language codes to faster-whisper supported codes
+    _LANG_MAP = {"hi-en": "hi"}
+
+    def _transcribe(self, audio: np.ndarray, time_offset: float) -> list[TranscriptSegment]:
+        if len(audio) == 0:
             return []
-        audio = np.concatenate(self._buffer)
-        offset = self._total_samples / self.queue.sample_rate
 
+        whisper_lang = None if self.language in ("auto", None) else self._LANG_MAP.get(self.language, self.language)
         segs, _ = self._model.transcribe(
             audio,
-            language=self.language,
+            language=whisper_lang,
             beam_size=5,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 500},
@@ -78,18 +89,43 @@ class Transcriber:
         for s in segs:
             text = s.text.strip()
             if text:
+                seg_start = time_offset + s.start
+                seg_end = time_offset + s.end
                 results.append(TranscriptSegment(
                     text=text,
-                    start=round(offset + s.start, 2),
-                    end=round(offset + s.end, 2),
+                    start=round(max(0, seg_start), 2),
+                    end=round(max(0, seg_end), 2),
                 ))
         return results
 
     def _flush(self):
-        segments = self._transcribe()
+        if not self._buffer:
+            return
+
+        audio = np.concatenate(self._buffer)
+
+        # Prepend overlap from previous chunk for context
+        if len(self._overlap_buffer) > 0:
+            audio_with_overlap = np.concatenate([self._overlap_buffer, audio])
+            # The time offset accounts for the overlap being from the previous batch
+            offset = (self._total_samples - len(self._overlap_buffer)) / self.queue.sample_rate
+        else:
+            audio_with_overlap = audio
+            offset = self._total_samples / self.queue.sample_rate
+
+        segments = self._transcribe(audio_with_overlap, offset)
+
+        # Save the tail of this chunk as overlap for the next batch
+        if len(audio) > self._overlap_samples:
+            self._overlap_buffer = audio[-self._overlap_samples:].copy()
+        else:
+            self._overlap_buffer = audio.copy()
+
+        # Advance total by the NEW samples only (not overlap)
         self._total_samples += self._buffer_samples
         self._buffer = []
         self._buffer_samples = 0
+
         for seg in segments:
             logger.debug(f"[{seg.start:.1f}s] {seg.text}")
             if self.on_segment:
