@@ -155,6 +155,12 @@ class Transcriber:
         if not self._buffer:
             return
 
+        # Drop stale queued audio — always process latest
+        queued = self.queue.size
+        if queued > 0:
+            self.queue.clear()
+            logger.debug(f"Cleared {queued} stale chunks from queue")
+
         audio = np.concatenate(self._buffer)
 
         # Prepend overlap from previous chunk for context

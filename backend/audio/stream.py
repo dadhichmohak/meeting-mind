@@ -8,7 +8,7 @@ from loguru import logger
 
 
 class AudioStreamQueue:
-    def __init__(self, sample_rate: int = 16000, maxsize: int = 200):
+    def __init__(self, sample_rate: int = 16000, maxsize: int = 500):
         self.sample_rate = sample_rate
         self._q: queue.Queue = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
@@ -18,10 +18,16 @@ class AudioStreamQueue:
         try:
             self._q.put_nowait(chunk.copy())
         except queue.Full:
+            # Drop oldest chunk to keep latest audio (FIFO eviction)
+            try:
+                self._q.get_nowait()
+                self._q.put_nowait(chunk.copy())
+            except queue.Empty:
+                pass
             with self._lock:
                 self._dropped += 1
             if self._dropped % 30 == 0:
-                logger.warning(f"Queue full — {self._dropped} chunks dropped")
+                logger.warning(f"Queue full — {self._dropped} chunks dropped (oldest evicted)")
 
     def get(self, timeout: float = 1.0) -> np.ndarray | None:
         try:
