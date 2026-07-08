@@ -23,6 +23,7 @@ AI-powered second brain for your busy schedule & meetings. Records, transcribes,
 
 | Layer | Technology |
 |-------|------------|
+| Language | Python 3.10+ |
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, Zustand |
 | Backend | FastAPI, SQLAlchemy, SQLite |
 | Transcription | faster-whisper (local, CPU) |
@@ -32,6 +33,8 @@ AI-powered second brain for your busy schedule & meetings. Records, transcribes,
 ## Setup
 
 ### 1. Backend
+
+Requires **Python 3.10+**.
 
 ```bash
 cd backend
