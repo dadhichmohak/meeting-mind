@@ -62,7 +62,7 @@ class UploadResponse(BaseModel):
     analysis: dict | None = None
 
 
-def _transcribe_file(audio_path: str, model_size: str = "base", language: str = "en") -> list[TranscriptSegment]:
+def _transcribe_file(audio_path: str, model_size: str = Config.WHISPER_MODEL, language: str = "en") -> list[TranscriptSegment]:
     """Transcribe an audio file using faster-whisper."""
     from faster_whisper import WhisperModel
     import numpy as np
@@ -149,7 +149,7 @@ def _save_upload_transcript(mid: str, filename: str, segments: list[TranscriptSe
 @router.post("", response_model=UploadResponse)
 async def upload_audio(
     file: UploadFile = File(...),
-    model_size: str = "base",
+    model_size: str = Config.WHISPER_MODEL,
     language: str = "en",
     summary_language: str = "en",
     groq_api_key: str | None = None,

@@ -18,6 +18,9 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
+    # Whisper transcription model: tiny, base, small, medium, large-v3
+    WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
+
     # Server
     BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")
     BACKEND_PORT = int(os.getenv("BACKEND_PORT", 8765))

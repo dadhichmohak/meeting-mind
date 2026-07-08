@@ -82,7 +82,7 @@ class StartRequest(BaseModel):
     loopback_device: int | None = None
     enable_loopback: bool = False
     use_wasapi: bool = True
-    model_size: str = "base"
+    model_size: str = Config.WHISPER_MODEL
     language: str = "en"
     summary_language: str = "en"
     vad_enabled: bool = True
