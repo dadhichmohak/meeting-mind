@@ -196,6 +196,7 @@ export default function App() {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      formData.append("stt_engine", prefs.sttEngine);
       formData.append("summary_language", prefs.summaryLang);
       if (prefs.groqApiKey) formData.append("groq_api_key", prefs.groqApiKey);
       const controller = new AbortController();

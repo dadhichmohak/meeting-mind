@@ -18,7 +18,11 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
+    # STT engine: "whisper" (local faster-whisper), "groq" (Groq Whisper API), or "nemo" (NVIDIA Parakeet)
+    STT_ENGINE = os.getenv("STT_ENGINE", "groq")
+
     # Whisper transcription model: tiny, base, small, medium, large-v3, large-v3-turbo
+    # Only used when STT_ENGINE=whisper
     WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 
     # Live transcription tuning (seconds)
@@ -46,5 +50,6 @@ if __name__ == "__main__":
     Config.validate()
     print(f"GROQ_API_KEY: {'***' + Config.GROQ_API_KEY[-4:] if Config.GROQ_API_KEY else 'NOT SET'}")
     print(f"GROQ_MODEL: {Config.GROQ_MODEL}")
+    print(f"STT_ENGINE: {Config.STT_ENGINE}")
     print(f"BACKEND: {Config.BACKEND_HOST}:{Config.BACKEND_PORT}")
     print(f"FRONTEND: {Config.FRONTEND_URL}")

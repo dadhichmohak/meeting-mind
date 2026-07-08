@@ -26,6 +26,10 @@ from backend.audio.capture import AudioCapture
 from backend.audio.stream import AudioStreamQueue
 from backend.audio.apps import list_audio_apps, list_input_devices, list_output_devices
 from backend.whisper.transcriber import Transcriber, TranscriptSegment
+from backend.stt.base import STTEngine
+from backend.stt.local import LocalSTT
+from backend.stt.groq import GroqSTT
+from backend.stt.nemo import NeMoSTT
 from backend.api.websocket import manager, push_segment, push_status
 from backend.llm.groq_engine import GroqEngine
 from backend.llm.analyzer import MeetingAnalyzer
@@ -41,6 +45,24 @@ except ImportError:
 router = APIRouter(prefix="/meetings", tags=["meetings"])
 
 init_db()
+
+
+def _create_stt_engine(api_key: str = "", engine_override: str = "") -> STTEngine:
+    """Create STT engine based on STT_ENGINE config or override."""
+    engine = (engine_override or Config.STT_ENGINE).lower()
+    if engine == "groq":
+        key = api_key or Config.GROQ_API_KEY
+        if not key:
+            logger.warning("GROQ_API_KEY not set — falling back to local Whisper")
+            return LocalSTT()
+        return GroqSTT(api_key=key)
+    if engine == "nemo":
+        try:
+            return NeMoSTT()
+        except Exception as e:
+            logger.warning(f"NeMo init failed: {e} — falling back to local Whisper")
+            return LocalSTT()
+    return LocalSTT()
 
 
 # ── Session state ────────────────────────────────────────────────────────────
@@ -82,6 +104,7 @@ class StartRequest(BaseModel):
     loopback_device: int | None = None
     enable_loopback: bool = False
     use_wasapi: bool = True
+    stt_engine: str = Config.STT_ENGINE
     model_size: str = Config.WHISPER_MODEL
     language: str = "en"
     summary_language: str = "en"
@@ -496,13 +519,13 @@ async def start_meeting(req: StartRequest):
 
     session.transcriber = Transcriber(
         stream_queue=q,
-        model_size=req.model_size,
+        stt_engine=_create_stt_engine(req.groq_api_key, req.stt_engine),
         language=req.language,
         buffer_duration_s=Config.WHISPER_BUFFER_S,
         overlap_duration_s=Config.WHISPER_OVERLAP_S,
         on_segment=on_segment,
     )
-    session.transcriber.load_model()
+    session.transcriber.load_model(req.model_size if req.stt_engine == "whisper" else "")
 
     # Start audio capture — prefer WASAPI loopback for system audio
     wasapi_started = False

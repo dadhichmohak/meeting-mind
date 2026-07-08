@@ -16,7 +16,11 @@ from pydantic import BaseModel
 from backend.config import Config
 from backend.database import SessionLocal
 from backend.models import Meeting, TranscriptSegment as TranscriptSegmentRow
-from backend.whisper.transcriber import Transcriber, TranscriptSegment
+from backend.stt.base import STTEngine
+from backend.stt.local import LocalSTT
+from backend.stt.groq import GroqSTT
+from backend.stt.nemo import NeMoSTT
+from backend.whisper.transcriber import TranscriptSegment
 from backend.llm.groq_engine import GroqEngine
 from backend.llm.analyzer import MeetingAnalyzer
 from backend.utils.transcript import build_raw_transcript
@@ -52,6 +56,24 @@ def _generate_title(analysis: dict, start_time: datetime = None) -> str:
     return f"{date_str}_{summary}"
 
 
+def _create_stt_engine(api_key: str = "", engine_override: str = "") -> STTEngine:
+    """Create STT engine for file transcription."""
+    engine = (engine_override or Config.STT_ENGINE).lower()
+    if engine == "groq":
+        key = api_key or Config.GROQ_API_KEY
+        if not key:
+            logger.warning("GROQ_API_KEY not set — falling back to local Whisper")
+            return LocalSTT()
+        return GroqSTT(api_key=key)
+    if engine == "nemo":
+        try:
+            return NeMoSTT()
+        except Exception as e:
+            logger.warning(f"NeMo init failed: {e} — falling back to local Whisper")
+            return LocalSTT()
+    return LocalSTT()
+
+
 class UploadResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
     meeting_id: str
@@ -62,35 +84,20 @@ class UploadResponse(BaseModel):
     analysis: dict | None = None
 
 
-def _transcribe_file(audio_path: str, model_size: str = Config.WHISPER_MODEL, language: str = "en") -> list[TranscriptSegment]:
-    """Transcribe an audio file using faster-whisper."""
-    from faster_whisper import WhisperModel
-    import numpy as np
+def _transcribe_file(audio_path: str, stt_engine: STTEngine, language: str = "en") -> tuple[list[TranscriptSegment], float]:
+    """Transcribe an audio file using the specified STT engine."""
+    logger.info(f"Transcribing file with {stt_engine.name}: {audio_path}")
+    stt_engine.load(language=language)
 
-    logger.info(f"Loading Whisper '{model_size}' for file transcription...")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    results, duration = stt_engine.transcribe_file(audio_path, language=language)
 
-    logger.info(f"Transcribing: {audio_path}")
-    segments_gen, info = model.transcribe(
-        audio_path,
-        language=language,
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 800},
-    )
+    segments = [
+        TranscriptSegment(text=r.text, start=r.start, end=r.end)
+        for r in results
+    ]
 
-    results = []
-    for seg in segments_gen:
-        text = seg.text.strip()
-        if text:
-            results.append(TranscriptSegment(
-                text=text,
-                start=round(seg.start, 2),
-                end=round(seg.end, 2),
-            ))
-
-    logger.info(f"Transcription complete: {len(results)} segments, {info.duration:.1f}s audio")
-    return results, info.duration
+    logger.info(f"Transcription complete: {len(segments)} segments, {duration:.1f}s audio")
+    return segments, duration
 
 
 def _save_upload_transcript(mid: str, filename: str, segments: list[TranscriptSegment], duration: float, analysis: dict = None, title: str = None) -> str:
@@ -149,7 +156,7 @@ def _save_upload_transcript(mid: str, filename: str, segments: list[TranscriptSe
 @router.post("", response_model=UploadResponse)
 async def upload_audio(
     file: UploadFile = File(...),
-    model_size: str = Config.WHISPER_MODEL,
+    stt_engine: str = Config.STT_ENGINE,
     language: str = "en",
     summary_language: str = "en",
     groq_api_key: str | None = None,
@@ -176,8 +183,9 @@ async def upload_audio(
         with open(tmp_path, "wb") as f:
             f.write(content)
 
-        # Transcribe
-        segments, duration = _transcribe_file(tmp_path, model_size=model_size, language=language)
+        # Create STT engine and transcribe
+        engine = _create_stt_engine(groq_api_key, stt_engine)
+        segments, duration = _transcribe_file(tmp_path, engine, language=language)
 
         # Build raw transcript (with timestamps + speakers for better analysis)
         raw_transcript = build_raw_transcript(segments)

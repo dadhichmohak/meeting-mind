@@ -1,6 +1,6 @@
 """
 Pulls chunks from AudioStreamQueue, preprocesses audio, accumulates
-a rolling buffer, transcribes using faster-whisper, fires a callback
+a rolling buffer, transcribes via STT engine, fires a callback
 with each TranscriptSegment.
 
 Uses overlapping context between chunks to avoid skipping text
@@ -10,10 +10,10 @@ over to the next transcription batch.
 import threading
 import numpy as np
 from dataclasses import dataclass, asdict
-from faster_whisper import WhisperModel
 from loguru import logger
 
 from backend.audio.stream import AudioStreamQueue
+from backend.stt.base import STTEngine, STTResult
 
 
 @dataclass
@@ -81,24 +81,19 @@ class Transcriber:
     def __init__(
         self,
         stream_queue: AudioStreamQueue,
-        model_size: str = "base",
+        stt_engine: STTEngine,
         language: str = "en",
-        device: str = "cpu",
-        compute_type: str = "int8",
         buffer_duration_s: float = 2.0,
         overlap_duration_s: float = 1.5,
         on_segment=None,
     ):
         self.queue = stream_queue
-        self.model_size = model_size
+        self.stt = stt_engine
         self.language = language
-        self.device = device
-        self.compute_type = compute_type
         self.buffer_duration_s = buffer_duration_s
         self.overlap_duration_s = overlap_duration_s
         self.on_segment = on_segment
 
-        self._model: WhisperModel | None = None
         self._thread: threading.Thread | None = None
         self._running = False
         self._buffer: list[np.ndarray] = []
@@ -109,47 +104,32 @@ class Transcriber:
         self._overlap_buffer: np.ndarray = np.array([], dtype=np.float32)
         self._preprocessor = AudioPreprocessor(self.queue.sample_rate)
 
-    def load_model(self):
-        logger.info(f"Loading Whisper '{self.model_size}' on {self.device}...")
-        self._model = WhisperModel(
-            self.model_size,
-            device=self.device,
-            compute_type=self.compute_type,
-        )
+    def load_model(self, model_name: str = ""):
+        logger.info(f"Loading STT engine: {self.stt.name}...")
+        self.stt.load(model_name, self.language)
         self._target_samples = int(self.buffer_duration_s * self.queue.sample_rate)
         self._overlap_samples = int(self.overlap_duration_s * self.queue.sample_rate)
         logger.info(
-            f"Whisper ready (buffer={self.buffer_duration_s}s, "
+            f"STT ready ({self.stt.name}, buffer={self.buffer_duration_s}s, "
             f"overlap={self.overlap_duration_s}s, "
             f"effective latency={self.buffer_duration_s - self.overlap_duration_s:.1f}s)"
         )
-
-    _LANG_MAP = {"hi-en": "hi"}
 
     def _transcribe(self, audio: np.ndarray, time_offset: float) -> list[TranscriptSegment]:
         if len(audio) == 0:
             return []
 
-        whisper_lang = None if self.language in ("auto", None) else self._LANG_MAP.get(self.language, self.language)
-        segs, _ = self._model.transcribe(
+        results = self.stt.transcribe(
             audio,
-            language=whisper_lang,
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 800},
+            sample_rate=self.queue.sample_rate,
+            language=self.language,
+            time_offset=time_offset,
         )
-        results = []
-        for s in segs:
-            text = s.text.strip()
-            if text:
-                seg_start = time_offset + s.start
-                seg_end = time_offset + s.end
-                results.append(TranscriptSegment(
-                    text=text,
-                    start=round(max(0, seg_start), 2),
-                    end=round(max(0, seg_end), 2),
-                ))
-        return results
+
+        return [
+            TranscriptSegment(text=r.text, start=r.start, end=r.end)
+            for r in results
+        ]
 
     def _flush(self):
         if not self._buffer:
@@ -214,8 +194,6 @@ class Transcriber:
         logger.info("Transcriber thread stopped")
 
     def start(self):
-        if not self._model:
-            raise RuntimeError("Call load_model() first")
         self._running = True
         self._thread = threading.Thread(target=self._run, daemon=True, name="transcriber")
         self._thread.start()

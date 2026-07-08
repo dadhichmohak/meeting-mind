@@ -6,12 +6,19 @@ interface SettingsProps {
   onClose: () => void;
 }
 
+const STT_ENGINES = [
+  { id: "groq", name: "Groq Whisper", description: "Cloud-based, fast, real-time (recommended)", requiresKey: true },
+  { id: "whisper", name: "Local Whisper", description: "Offline, slower on CPU, free", requiresKey: false },
+  { id: "nemo", name: "NVIDIA Parakeet", description: "GPU-accelerated, fastest local option", requiresKey: false },
+];
+
 export function Settings({ onClose }: SettingsProps) {
   const prefs = usePreferences();
   const [apiKey, setApiKey] = useState(prefs.groqApiKey);
   const [transLang, setTransLang] = useState(prefs.transcriptionLang);
   const [summLang, setSummLang] = useState(prefs.summaryLang);
   const [wasapi, setWasapi] = useState(prefs.useWasapi);
+  const [sttEngine, setSttEngine] = useState(prefs.sttEngine);
   const [showKey, setShowKey] = useState(false);
 
   const save = () => {
@@ -19,6 +26,7 @@ export function Settings({ onClose }: SettingsProps) {
     prefs.setTranscriptionLang(transLang);
     prefs.setSummaryLang(summLang);
     prefs.setUseWasapi(wasapi);
+    prefs.setSttEngine(sttEngine);
     onClose();
   };
 
@@ -44,13 +52,52 @@ export function Settings({ onClose }: SettingsProps) {
         </div>
 
         <div className="px-6 pb-6 space-y-6 overflow-y-auto max-h-[calc(80vh-80px)]">
+          {/* STT Engine */}
+          <div>
+            <label className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider block mb-2">
+              Speech-to-Text Engine
+            </label>
+            <p className="text-[12px] theme-text-muted mb-3">
+              Choose the transcription engine for meetings
+            </p>
+            <div className="space-y-2">
+              {STT_ENGINES.map((engine) => (
+                <button
+                  key={engine.id}
+                  onClick={() => setSttEngine(engine.id)}
+                  disabled={engine.requiresKey && !apiKey}
+                  className={`w-full text-left px-4 py-3 rounded-xl transition-all border ${
+                    sttEngine === engine.id
+                      ? "theme-accent theme-border"
+                      : "theme-text-secondary theme-border hover:theme-surface-hover"
+                  } ${engine.requiresKey && !apiKey ? "opacity-40 cursor-not-allowed" : ""}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[13px] font-medium theme-text">{engine.name}</span>
+                      {engine.requiresKey && (
+                        <span className="ml-2 text-[10px] theme-text-muted">(requires API key)</span>
+                      )}
+                    </div>
+                    {sttEngine === engine.id && (
+                      <svg className="w-4 h-4 theme-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                      </svg>
+                    )}
+                  </div>
+                  <p className="text-[11px] theme-text-muted mt-1">{engine.description}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Groq API Key */}
           <div>
             <label className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider block mb-2">
               Groq API Key
             </label>
             <p className="text-[12px] theme-text-muted mb-3">
-              Get yours at{" "}
+              Required for Groq Whisper engine and AI analysis. Get yours at{" "}
               <a href="https://console.groq.com/keys" target="_blank" rel="noopener" className="theme-accent hover:underline">
                 console.groq.com/keys
               </a>
