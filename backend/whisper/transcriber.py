@@ -1,13 +1,12 @@
 """
-Pulls chunks from AudioStreamQueue, accumulates a rolling buffer,
-transcribes every N seconds using faster-whisper, fires a callback
+Pulls chunks from AudioStreamQueue, preprocesses audio, accumulates
+a rolling buffer, transcribes using faster-whisper, fires a callback
 with each TranscriptSegment.
 
 Uses overlapping context between chunks to avoid skipping text
 at boundaries — the last `overlap_duration_s` of audio is carried
 over to the next transcription batch.
 """
-import time
 import threading
 import numpy as np
 from dataclasses import dataclass, asdict
@@ -20,12 +19,62 @@ from backend.audio.stream import AudioStreamQueue
 @dataclass
 class TranscriptSegment:
     text: str
-    start: float        # seconds since meeting start
+    start: float
     end: float
     speaker: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+class AudioPreprocessor:
+    """Cleans audio before Whisper: high-pass, normalize, noise gate."""
+
+    def __init__(self, sample_rate: int = 16000):
+        self.sample_rate = sample_rate
+        # 2nd-order Butterworth high-pass at 80 Hz — removes rumble/hum
+        self._hp_b = np.array([0.9723, -1.9446, 0.9723], dtype=np.float64)
+        self._hp_a = np.array([1.0, -1.9446, 0.9449], dtype=np.float64)
+        self._hp_x = np.zeros(2, dtype=np.float64)
+        self._hp_y = np.zeros(2, dtype=np.float64)
+
+    def process(self, audio: np.ndarray) -> np.ndarray:
+        audio = self._highpass(audio)
+        audio = self._normalize(audio)
+        audio = self._noise_gate(audio)
+        return audio.astype(np.float32)
+
+    def _highpass(self, audio: np.ndarray) -> np.ndarray:
+        """2nd-order IIR high-pass filter with state continuity."""
+        x = audio.astype(np.float64)
+        y = np.zeros_like(x)
+        for i in range(len(x)):
+            y[i] = (
+                self._hp_b[0] * x[i]
+                + self._hp_b[1] * self._hp_x[0]
+                + self._hp_b[2] * self._hp_x[1]
+                - self._hp_a[1] * self._hp_y[0]
+                - self._hp_a[2] * self._hp_y[1]
+            )
+            self._hp_x[1] = self._hp_x[0]
+            self._hp_x[0] = x[i]
+            self._hp_y[1] = self._hp_y[0]
+            self._hp_y[0] = y[i]
+        return y
+
+    def _normalize(self, audio: np.ndarray) -> np.ndarray:
+        """Peak-normalize to 0.9 peak amplitude."""
+        peak = np.max(np.abs(audio))
+        if peak > 1e-6:
+            audio = audio * (0.9 / peak)
+        return audio
+
+    def _noise_gate(self, audio: np.ndarray) -> np.ndarray:
+        """Zero out samples below noise floor (RMS * 2)."""
+        rms = np.sqrt(np.mean(audio ** 2))
+        threshold = rms * 2.0
+        audio[np.abs(audio) < threshold] = 0.0
+        return audio
 
 
 class Transcriber:
@@ -36,7 +85,7 @@ class Transcriber:
         language: str = "en",
         device: str = "cpu",
         compute_type: str = "int8",
-        buffer_duration_s: float = 5.0,
+        buffer_duration_s: float = 2.0,
         overlap_duration_s: float = 1.5,
         on_segment=None,
     ):
@@ -58,6 +107,7 @@ class Transcriber:
         self._target_samples = 0
         self._overlap_samples = 0
         self._overlap_buffer: np.ndarray = np.array([], dtype=np.float32)
+        self._preprocessor = AudioPreprocessor(self.queue.sample_rate)
 
     def load_model(self):
         logger.info(f"Loading Whisper '{self.model_size}' on {self.device}...")
@@ -68,9 +118,12 @@ class Transcriber:
         )
         self._target_samples = int(self.buffer_duration_s * self.queue.sample_rate)
         self._overlap_samples = int(self.overlap_duration_s * self.queue.sample_rate)
-        logger.info(f"Whisper ready (buffer={self.buffer_duration_s}s, overlap={self.overlap_duration_s}s)")
+        logger.info(
+            f"Whisper ready (buffer={self.buffer_duration_s}s, "
+            f"overlap={self.overlap_duration_s}s, "
+            f"effective latency={self.buffer_duration_s - self.overlap_duration_s:.1f}s)"
+        )
 
-    # Map composite language codes to faster-whisper supported codes
     _LANG_MAP = {"hi-en": "hi"}
 
     def _transcribe(self, audio: np.ndarray, time_offset: float) -> list[TranscriptSegment]:
@@ -83,7 +136,7 @@ class Transcriber:
             language=whisper_lang,
             beam_size=5,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
+            vad_parameters={"min_silence_duration_ms": 800},
         )
         results = []
         for s in segs:
@@ -107,11 +160,13 @@ class Transcriber:
         # Prepend overlap from previous chunk for context
         if len(self._overlap_buffer) > 0:
             audio_with_overlap = np.concatenate([self._overlap_buffer, audio])
-            # The time offset accounts for the overlap being from the previous batch
             offset = (self._total_samples - len(self._overlap_buffer)) / self.queue.sample_rate
         else:
             audio_with_overlap = audio
             offset = self._total_samples / self.queue.sample_rate
+
+        # Preprocess: high-pass, normalize, noise gate
+        audio_with_overlap = self._preprocessor.process(audio_with_overlap)
 
         segments = self._transcribe(audio_with_overlap, offset)
 

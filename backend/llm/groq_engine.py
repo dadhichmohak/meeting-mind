@@ -76,6 +76,10 @@ class GroqEngine:
             response = client.chat.completions.create(**kwargs)
             return response.choices[0].message.content
         except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "limit" in err_str or "429" in err_str:
+                logger.warning(f"Groq rate limit hit: {e}")
+                return "RATE_LIMIT_ERROR"
             logger.error(f"Groq API error: {e}")
             return ""
 

@@ -34,7 +34,7 @@ export default {
         "sidebar-hover":  "var(--sidebar-hover)",
       },
       fontFamily: {
-        serif: ["'Cormorant Garamond'", "Georgia", "serif"],
+        serif: ["'Instrument Serif'", "Georgia", "serif"],
         sans: ["'Inter'", "system-ui", "sans-serif"],
         mono: ["'JetBrains Mono'", "monospace"],
       },

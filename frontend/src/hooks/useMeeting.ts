@@ -29,12 +29,13 @@ export function useMeeting() {
     } catch { /* silently fail */ }
   }, []);
 
-  const startMeeting = useCallback(async (overrides?: { enable_loopback?: boolean; use_wasapi?: boolean; mic_device?: number }) => {
+  const startMeeting = useCallback(async (overrides?: { enable_loopback?: boolean; use_wasapi?: boolean; mic_device?: number; title?: string }) => {
     store.setStatus("loading");
     store.setError(null);
     try {
       const enableLoopback = overrides?.enable_loopback ?? prefs.useWasapi;
       const body = {
+        title: overrides?.title || undefined,
         mic_device: overrides?.mic_device ?? store.selectedMicDevice,
         loopback_device: store.selectedLoopbackDevice,
         enable_loopback: enableLoopback,
@@ -42,7 +43,6 @@ export function useMeeting() {
         model_size: "base",
         language: prefs.transcriptionLang,
         summary_language: prefs.summaryLang,
-        vad_enabled: true,
         groq_api_key: prefs.groqApiKey || undefined,
       };
       const r = await fetch(`${API}/meetings/start`, {

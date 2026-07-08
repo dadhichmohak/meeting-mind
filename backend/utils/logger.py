@@ -13,7 +13,7 @@ def setup_logger(level: str = "INFO"):
         colorize=True,
     )
     logger.add(
-        "logs/meetingmind.log",
+        "logs/metmind.log",
         rotation="10 MB",
         retention="7 days",
         level="DEBUG",

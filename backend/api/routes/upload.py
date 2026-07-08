@@ -69,7 +69,7 @@ def _transcribe_file(audio_path: str, model_size: str = "base", language: str = 
         language=language,
         beam_size=5,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
+        vad_parameters={"min_silence_duration_ms": 800},
     )
 
     results = []
@@ -192,8 +192,9 @@ async def upload_audio(
         else:
             analysis = {"info": "GROQ_API_KEY not set — skipping analysis."}
 
-        # Generate meeting title from analysis summary
-        meeting_title = _generate_title(analysis)
+        # Use filename as meeting title (strip extension, clean up)
+        raw_name = Path(file.filename or "unknown").stem
+        meeting_title = re.sub(r"[^a-zA-Z0-9\s_-]", "", raw_name).strip() or raw_name
 
         # Save transcript file
         _save_upload_transcript(mid, file.filename or "unknown", segments, duration, analysis, title=meeting_title)

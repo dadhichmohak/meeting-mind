@@ -85,7 +85,7 @@ function groupByDate(items: MeetingSummary[]): { label: string; items: MeetingSu
   return groups;
 }
 
-export function MeetingHistory() {
+export function MeetingHistory({ onSelectMeeting }: { onSelectMeeting?: (id: string | null) => void }) {
   const [meetings, setMeetings] = useState<MeetingSummary[]>([]);
   const [selected, setSelected] = useState<MeetingDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -118,6 +118,7 @@ export function MeetingHistory() {
       setSelected(data);
       setEditTitle(data.title || "");
       setEditNotes(data.notes || "");
+      onSelectMeeting?.(id);
     } catch { /* silently fail */ }
     setLoading(false);
   };
@@ -183,6 +184,16 @@ export function MeetingHistory() {
 
   useEffect(() => { fetchMeetings(); }, [status]);
 
+  // Re-fetch when component mounts or user navigates back from detail
+  useEffect(() => {
+    fetchMeetings();
+  }, []);
+
+  // Re-fetch every time user comes back to list view (selected becomes null)
+  useEffect(() => {
+    if (!selected) fetchMeetings();
+  }, [selected]);
+
   useEffect(() => {
     const t = setTimeout(() => { doSearch(query); }, 300);
     return () => clearTimeout(t);
@@ -205,7 +216,7 @@ export function MeetingHistory() {
     return (
       <div className="pt-24 pb-40 px-8" style={{ maxWidth: "900px" }}>
         <button
-          onClick={() => { setSelected(null); setSearchResults(null); setQuery(""); }}
+          onClick={() => { setSelected(null); setSearchResults(null); setQuery(""); onSelectMeeting?.(null); }}
           className="flex items-center gap-2 text-[13px] theme-text-muted hover:theme-text transition-colors mb-6"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -224,6 +235,7 @@ export function MeetingHistory() {
                   onChange={(e) => setEditTitle(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && saveTitle()}
                   className="flex-1 bg-transparent border-b-2 border-accent text-[28px] font-serif theme-text outline-none py-1"
+                  style={{ fontWeight: 400 }}
                   autoFocus
                 />
                 <button onClick={saveTitle} disabled={saving} className="px-4 py-2 rounded-2xl theme-accent-bg text-white text-[13px] font-semibold hover:opacity-90 disabled:opacity-40">
@@ -405,9 +417,20 @@ export function MeetingHistory() {
   // ── List View (Granola-style) ──────────────────────────────────
   return (
     <div className="pt-24 pb-40 px-8" style={{ maxWidth: "800px" }}>
-      <h1 className="text-[40px] font-serif theme-text-muted mb-6" style={{ fontWeight: 500 }}>
-        History
-      </h1>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-[40px] font-serif theme-text-muted" style={{ fontWeight: 400 }}>
+          History
+        </h1>
+        <button
+          onClick={fetchMeetings}
+          className="p-2 rounded-xl theme-text-muted hover:theme-text hover:theme-surface-hover transition-colors"
+          title="Refresh"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" />
+          </svg>
+        </button>
+      </div>
 
       {/* Search */}
       <div className="relative mb-6">

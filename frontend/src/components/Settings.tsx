@@ -32,7 +32,7 @@ export function Settings({ onClose }: SettingsProps) {
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-5">
-          <h2 className="text-[18px] font-serif theme-text" style={{ fontWeight: 500 }}>Settings</h2>
+          <h2 className="text-[18px] font-serif theme-text" style={{ fontWeight: 400 }}>Settings</h2>
           <button
             onClick={onClose}
             className="p-2 rounded-xl theme-text-muted hover:theme-text hover:theme-surface-hover transition-colors"

@@ -4,13 +4,13 @@ AI-powered second brain for your busy schedule & meetings. Records, transcribes,
 
 ## Features
 
-- **Live Transcription** — Real-time speech-to-text via faster-whisper
+- **Live Transcription** — Real-time speech-to-text via faster-whisper (~0.5s latency)
+- **Audio Preprocessing** — High-pass filter, peak normalization, and noise gate for clean transcription input
 - **Dual Audio Capture** — Record microphone + any app/window audio simultaneously
 - **WASAPI Loopback** — Capture browser/app audio even when speaker is muted (taps into audio stream before volume control)
 - **Smart App Detection** — Shows which apps are currently producing audio (Brave, Zoom, Spotify, etc.)
 - **AI Analysis** — Automatic summarization, action items, decisions, and risks via Groq LLM
 - **Meeting History** — Browse past meetings with full transcripts and analysis
-- **Voice Activity Detection** — Smart filtering to skip silence
 - **Markdown Export** — Each meeting saves as a structured .md file
 - **Full-Text Search** — Search across meeting titles and transcript segments
 - **Audio Upload** — Upload and transcribe pre-recorded audio files (MP3, WAV, M4A, OGG, FLAC, WebM, MP4, AAC, WMA)
@@ -18,6 +18,7 @@ AI-powered second brain for your busy schedule & meetings. Records, transcribes,
 - **Dark/Light Theme** — Blue-cyan-teal brand palette with theme toggle
 - **Minimizable Recording** — Minimize recording modal to a compact bar while recording continues
 - **Audio Source Selector** — Choose mic-only, system-audio-only, or both before recording
+- **Custom Meeting Titles** — Name your meeting before recording starts (defaults to timestamp if empty)
 
 ## Tech Stack
 
@@ -86,6 +87,19 @@ The app uses **WASAPI loopback** to capture system audio. This works even when y
 2. Enable **Stereo Mix** (or install [VB-Cable](https://vb-audio.com/Cable/))
 3. Select "Mic only" mode and configure the loopback device manually
 
+## How Transcription Works
+
+The transcription pipeline is optimized for low latency and clean audio:
+
+1. **Audio Capture** — Chunks arrive every 500ms from mic/system audio
+2. **Preprocessing** — Each batch is cleaned before Whisper:
+   - High-pass filter (80Hz, 2nd-order Butterworth) removes rumble/hum
+   - Peak normalization (0.9) ensures consistent volume levels
+   - Noise gate (2× RMS threshold) suppresses background hiss
+3. **Overlapping Context** — 2.0s buffer with 1.5s overlap between batches. Only 0.5s of new audio is processed per batch, giving ~0.5s effective latency while maintaining cross-chunk context for accuracy
+4. **Whisper Transcription** — faster-whisper (base model, CPU, int8) with VAD filter (min_silence=800ms)
+5. **WebSocket Push** — Segments stream to the frontend in real-time
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
@@ -94,7 +108,7 @@ The app uses **WASAPI loopback** to capture system audio. This works even when y
 | GET | `/config` | Non-sensitive config |
 | GET | `/meetings/list` | List past meetings |
 | GET | `/meetings/{id}` | Get meeting + transcript + analysis |
-| POST | `/meetings/start` | Start recording |
+| POST | `/meetings/start` | Start recording (accepts optional `title`) |
 | POST | `/meetings/stop` | Stop & save |
 | POST | `/meetings/reset` | Force-reset stuck session |
 | GET | `/meetings/status` | Current session status |
@@ -108,17 +122,17 @@ The app uses **WASAPI loopback** to capture system audio. This works even when y
 ## Project Structure
 
 ```
-meeting-mind/
+metmind/
 ├── backend/
 │   ├── api/           # FastAPI routes + WebSocket
-│   ├── audio/         # Mic/loopback capture, VAD, WASAPI, app detection
+│   ├── audio/         # Mic/loopback capture, WASAPI, app detection
 │   │   ├── capture.py        # sounddevice mic/loopback
 │   │   ├── wasapi_capture.py # WASAPI loopback (system audio)
 │   │   ├── apps.py           # Audio app enumeration (pycaw)
 │   │   ├── stream.py         # Thread-safe audio queue
-│   │   └── vad.py            # Voice activity detection
+│   │   └── vad.py            # Voice activity detection (Silero)
 │   ├── llm/           # Groq engine, analyzer, prompts
-│   ├── whisper/       # faster-whisper transcriber
+│   ├── whisper/       # faster-whisper transcriber + audio preprocessor
 │   ├── utils/         # Logger setup
 │   ├── config.py      # Env config loader
 │   ├── database.py    # SQLAlchemy + SQLite
@@ -137,6 +151,7 @@ meeting-mind/
 ## UI Overview
 
 ### Floating Bar (Bottom Center)
+- **Meeting Title Input** — Optional title field (defaults to timestamp)
 - **Record Button** — Starts recording with animated waveform indicator
 - **Audio Source Toggle** — Mic / System / Both (three icon buttons)
 - **Search Bar** — "Ask anything" input with "What did I miss" quick-action

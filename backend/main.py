@@ -1,9 +1,9 @@
 """
-MeetingMind AI — Backend entry point.
+MetMind — Backend entry point.
 Reads configuration from .env file.
 
 Run with: python -m backend.main
-         (from the meetingmind-ai/ root, with venv active)
+         (from the project root, with venv active)
 """
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -31,7 +31,7 @@ def main():
     for d in ["meetings", "logs", "exports"]:
         Path(d).mkdir(exist_ok=True)
 
-    logger.info(f"Starting MeetingMind AI on {Config.BACKEND_HOST}:{Config.BACKEND_PORT}")
+    logger.info(f"Starting MetMind on {Config.BACKEND_HOST}:{Config.BACKEND_PORT}")
     logger.info(f"Groq model: {Config.GROQ_MODEL}")
     logger.info(f"Frontend URL: {Config.FRONTEND_URL}")
 

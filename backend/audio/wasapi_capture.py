@@ -10,7 +10,6 @@ import numpy as np
 from loguru import logger
 
 from backend.audio.stream import AudioStreamQueue
-from backend.audio.vad import VoiceActivityDetector
 
 
 class WASAPICapture:
@@ -19,12 +18,10 @@ class WASAPICapture:
     def __init__(
         self,
         stream_queue: AudioStreamQueue,
-        vad: VoiceActivityDetector | None = None,
         sample_rate: int = 16000,
         chunk_duration_ms: int = 500,
     ):
         self.queue = stream_queue
-        self.vad = vad
         self.sample_rate = sample_rate
         self.chunk_size = int(sample_rate * chunk_duration_ms / 1000)
         # Device-native rate/channels are discovered in start(); until then we
@@ -69,10 +66,6 @@ class WASAPICapture:
             audio = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
             audio = self._to_mono(audio)
             audio = self._resample(audio)
-
-            if self.vad and not self.vad.is_speech(audio):
-                return (None, 0)
-
             self.queue.put(audio)
         except Exception as e:
             logger.debug(f"WASAPI callback error: {e}")

@@ -25,6 +25,7 @@ export default function App() {
   const { startMeeting, stopMeeting } = useMeeting();
   const [view, setView] = useState<"note" | "history">("note");
   const [noteText, setNoteText] = useState("");
+  const [noteTitle, setNoteTitle] = useState("");
   const [analysis, setAnalysis] = useState<any>(null);
   const [showRecording, setShowRecording] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -33,12 +34,20 @@ export default function App() {
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchLlmAnswer, setSearchLlmAnswer] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [activeFilter, setActiveFilter] = useState<"all" | "today" | "me">("all");
+  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
   const [recordingMinimized, setRecordingMinimized] = useState(false);
   const [audioSource, setAudioSource] = useState<AudioSource>("both");
+  const [meetingTitle, setMeetingTitle] = useState("");
   const [devices, setDevices] = useState<any>({ devices: [], apps: [], input_devices: [], output_devices: [] });
+  const [now, setNow] = useState(new Date());
+  const [askPrompt, setAskPrompt] = useState("");
+  const [askMessages, setAskMessages] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
+  const [askLoading, setAskLoading] = useState(false);
+  const [rateLimitPopup, setRateLimitPopup] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
@@ -50,6 +59,11 @@ export default function App() {
       .then(r => r.json())
       .then(setDevices)
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -74,33 +88,76 @@ export default function App() {
   const handleStart = async () => {
     const enableLoopback = audioSource === "system" || audioSource === "both";
     const micDevice = audioSource === "system" ? undefined : undefined;
+    const title = meetingTitle.trim() || undefined;
     await startMeeting({
       enable_loopback: enableLoopback,
       use_wasapi: true,
       mic_device: micDevice,
+      title,
     });
     setRecordingMinimized(false);
   };
   const handleStop = async () => { await stopMeeting(); };
 
+  const handleAsk = async () => {
+    const q = askPrompt.trim();
+    if (!q || askLoading) return;
+    const userMsg = { role: "user" as const, text: q };
+    setAskMessages((prev) => [...prev, userMsg]);
+    setAskPrompt("");
+    setAskLoading(true);
+    try {
+      const transcriptText = segments.map((s) => s.text).join(" ");
+      const history = askMessages.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.text}`).join("\n");
+      const fullPrompt = history ? `${history}\nUser: ${q}` : q;
+      const r = await fetch(`${API}/meetings/ask`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: fullPrompt,
+          transcript: transcriptText,
+          groq_api_key: prefs.groqApiKey || undefined,
+        }),
+      });
+      const data = await r.json();
+      if (data.error) {
+        if (data.error.toLowerCase().includes("rate") || data.error.toLowerCase().includes("limit")) {
+          setRateLimitPopup(true);
+          setTimeout(() => setRateLimitPopup(false), 5000);
+        }
+        setAskMessages((prev) => [...prev, { role: "assistant", text: data.error }]);
+      } else {
+        setAskMessages((prev) => [...prev, { role: "assistant", text: data.response }]);
+      }
+    } catch {
+      setAskMessages((prev) => [...prev, { role: "assistant", text: "Failed to reach the server." }]);
+    }
+    setAskLoading(false);
+  };
+
   const handleSearch = useCallback(async (query: string) => {
     const q = query.trim();
     if (!q) {
       setSearchResults([]);
+      setSearchLlmAnswer(null);
       setShowSearch(false);
       return;
     }
     setIsSearching(true);
     try {
-      const r = await fetch(`${API}/meetings/search?q=${encodeURIComponent(q)}&limit=5`);
+      const params = new URLSearchParams({ q, limit: "5" });
+      if (selectedMeetingId) params.set("meeting_id", selectedMeetingId);
+      const r = await fetch(`${API}/meetings/search?${params}`);
       const data = await r.json();
       setSearchResults(data.results || []);
+      setSearchLlmAnswer(data.llm_answer || null);
       setShowSearch(true);
     } catch {
       setSearchResults([]);
+      setSearchLlmAnswer(null);
     }
     setIsSearching(false);
-  }, []);
+  }, [selectedMeetingId]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -142,15 +199,28 @@ export default function App() {
       formData.append("file", file);
       formData.append("summary_language", prefs.summaryLang);
       if (prefs.groqApiKey) formData.append("groq_api_key", prefs.groqApiKey);
-      const r = await fetch(`${API}/upload`, { method: "POST", body: formData });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 300000); // 5 min timeout
+      const r = await fetch(`${API}/upload`, {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
       const data = await r.json();
       if (!r.ok) {
         setUploadResult({ error: data.detail || data.error || "Upload failed" });
       } else {
         setUploadResult(data);
+        // Re-fetch meeting list so history updates
+        fetch(`${API}/meetings/list`).then(res => res.json()).catch(() => {});
       }
-    } catch (e) {
-      setUploadResult({ error: "Upload failed — could not connect to server" });
+    } catch (e: any) {
+      if (e.name === "AbortError") {
+        setUploadResult({ error: "Upload timed out — file may be too large" });
+      } else {
+        setUploadResult({ error: "Upload failed — could not connect to server" });
+      }
     }
     setUploading(false);
   };
@@ -166,9 +236,14 @@ export default function App() {
   const SidebarContent = ({ mobile }: { mobile: boolean }) => (
     <>
       <div className="px-5 py-6 flex items-center justify-between">
-        <h1 className="text-[20px] font-serif theme-text" style={{ fontWeight: 500 }}>
-          MetMind
-        </h1>
+        <div>
+          <h1 className="text-[20px] font-serif theme-text" style={{ fontWeight: 400 }}>
+            MetMind
+          </h1>
+          <p className="text-[11px] theme-text-muted mt-0.5 font-mono tabular-nums">
+            {now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} &middot; {now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+          </p>
+        </div>
         {mobile && (
           <button onClick={() => setSidebarOpen(false)} className="p-1.5 rounded-lg theme-text-muted hover:theme-text">
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -187,7 +262,7 @@ export default function App() {
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
           </svg>
-          Note
+          Record
         </button>
         <button
           onClick={() => setView("history")}
@@ -273,15 +348,20 @@ export default function App() {
             <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
           </svg>
         </button>
-        <h1 className="ml-3 text-[18px] font-serif theme-text" style={{ fontWeight: 500 }}>MetMind</h1>
+        <h1 className="ml-3 text-[18px] font-serif theme-text" style={{ fontWeight: 400 }}>MetMind</h1>
       </div>
 
       {/* Main Content */}
       {view === "note" ? (
         <div className="pt-20 lg:pt-24 pb-40 px-4 sm:px-6 lg:px-8 lg:ml-[240px] max-w-[900px] mx-auto lg:mx-0">
-          <h1 className="font-serif text-[32px] sm:text-[40px] theme-text-muted mb-6 sm:mb-8" style={{ fontWeight: 500 }}>
-            New note
-          </h1>
+          <input
+            type="text"
+            value={noteTitle}
+            onChange={(e) => setNoteTitle(e.target.value)}
+            placeholder="Untitled note"
+            className="w-full bg-transparent font-serif text-[32px] sm:text-[40px] theme-text outline-none placeholder:theme-text-muted mb-2"
+            style={{ fontWeight: 500 }}
+          />
           <div className="flex items-center gap-2 sm:gap-3 mb-6 sm:mb-8 flex-wrap">
             <button
               onClick={() => {
@@ -323,13 +403,53 @@ export default function App() {
               </button>
             )}
           </div>
-          <textarea
-            value={noteText}
-            onChange={(e) => setNoteText(e.target.value)}
-            placeholder="Write notes"
-            className="w-full bg-transparent text-[22px] sm:text-[28px] theme-text-placeholder font-serif resize-none outline-none leading-relaxed"
-            style={{ fontWeight: 400, minHeight: "200px" }}
-          />
+          <div className="theme-surface rounded-2xl theme-border border p-4 sm:p-6 mb-6">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider">Key Points</span>
+            </div>
+            <textarea
+              value={noteText}
+              onChange={(e) => setNoteText(e.target.value)}
+              placeholder="Add key points, decisions, or action items..."
+              className="w-full bg-transparent text-[14px] sm:text-[15px] theme-text-secondary resize-none outline-none leading-relaxed placeholder:theme-text-muted"
+              style={{ minHeight: "100px" }}
+            />
+          </div>
+          <div className="theme-surface rounded-2xl theme-border border p-4 sm:p-6">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider">Notes</span>
+            </div>
+            <textarea
+              value=""
+              placeholder="Write anything else..."
+              className="w-full bg-transparent text-[14px] sm:text-[15px] theme-text-secondary resize-none outline-none leading-relaxed placeholder:theme-text-muted"
+              style={{ minHeight: "80px" }}
+            />
+          </div>
+          {isRecording && segments.length > 0 && (
+            <div className="mt-6 animate-fade-in-up">
+              <div className="theme-surface rounded-2xl theme-border border p-4 sm:p-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="w-2 h-2 rounded-full theme-recording-bg animate-pulse" />
+                  <span className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider">Live Transcript</span>
+                  <span className="text-[11px] theme-text-muted ml-auto">{fmtTime(duration)}</span>
+                </div>
+                <div
+                  ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}
+                  className="max-h-[200px] overflow-y-auto space-y-2"
+                >
+                  {segments.slice(-8).map((seg, i) => (
+                    <div key={i} className="flex gap-2 py-1">
+                      <span className="font-mono text-[10px] theme-text-muted pt-0.5 w-10 shrink-0 tabular-nums">
+                        {fmtTime(seg.start)}
+                      </span>
+                      <span className="text-[13px] theme-text-secondary leading-relaxed">{seg.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
           {uploading && (
             <div className="mt-8 sm:mt-12 animate-fade-in-up">
               <div className="theme-surface rounded-4xl theme-border border p-6 sm:p-8 transition-colors">
@@ -400,78 +520,108 @@ export default function App() {
           )}
           {analysis && !analysis.error && analysis.summary && (
             <div className="mt-8 sm:mt-12 animate-fade-in-up">
-              <div className="theme-surface rounded-4xl theme-border border p-6 sm:p-8 transition-colors">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-8 h-8 rounded-full bg-accent/10 flex items-center justify-center">
-                    <svg className="w-4 h-4 theme-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <div className="rounded-2xl border theme-border p-6 sm:p-8 transition-colors">
+                {/* Meeting Title */}
+                <h2 className="font-serif text-[28px] sm:text-[32px] theme-text mb-3" style={{ fontWeight: 400 }}>
+                  {meetingTitle || "Meeting Summary"}
+                </h2>
+                {/* Tags */}
+                <div className="flex flex-wrap items-center gap-2 mb-8">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium theme-accent-bg text-white">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
                     </svg>
+                    Enhanced
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium theme-surface-secondary theme-text-secondary border theme-border">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
+                    </svg>
+                    {new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium theme-surface-secondary theme-text-secondary border theme-border">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />
+                    </svg>
+                    Me
+                  </span>
+                  {duration > 0 && (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-medium theme-surface-secondary theme-text-secondary border theme-border">
+                      {fmtTime(duration)}
+                    </span>
+                  )}
+                </div>
+
+                {/* Summary */}
+                <div className="mb-8">
+                  <p className="text-[14px] sm:text-[15px] theme-text-secondary leading-relaxed">{analysis.summary}</p>
+                </div>
+
+                {/* Sections */}
+                {analysis.decisions?.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="flex items-center gap-2 text-[13px] font-semibold theme-text mb-3">
+                      <span className="theme-accent">#</span> Key Decisions
+                    </h3>
+                    <ul className="space-y-2 ml-5">
+                      {analysis.decisions.map((d: string, i: number) => (
+                        <li key={i} className="text-[13px] sm:text-[14px] theme-text-secondary leading-relaxed list-disc marker:theme-text-muted">{d}</li>
+                      ))}
+                    </ul>
                   </div>
-                  <h3 className="text-[13px] font-semibold theme-text-secondary uppercase tracking-wider">AI Summary</h3>
-                </div>
-                <p className="text-[14px] sm:text-[15px] theme-text-secondary leading-relaxed mb-6">{analysis.summary}</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
-                  {analysis.decisions?.length > 0 && (
-                    <div>
-                      <h4 className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider mb-2">Decisions</h4>
-                      <ul className="space-y-1.5">
-                        {analysis.decisions.map((d: string, i: number) => (
-                          <li key={i} className="flex gap-2 text-[13px] theme-text-secondary">
-                            <span className="theme-accent shrink-0">&#10003;</span><span>{d}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {analysis.action_items?.length > 0 && (
-                    <div>
-                      <h4 className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider mb-2">Action Items</h4>
-                      <ul className="space-y-1.5">
-                        {analysis.action_items.map((a: string, i: number) => (
-                          <li key={i} className="flex gap-2 text-[13px] theme-text-secondary">
-                            <span className="theme-accent shrink-0">&#8594;</span><span>{a}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {analysis.questions?.length > 0 && (
-                    <div>
-                      <h4 className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider mb-2">Questions</h4>
-                      <ul className="space-y-1.5">
-                        {analysis.questions.map((q: string, i: number) => (
-                          <li key={i} className="flex gap-2 text-[13px] theme-text-secondary">
-                            <span className="theme-warning shrink-0">?</span><span>{q}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {analysis.risks?.length > 0 && (
-                    <div>
-                      <h4 className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider mb-2">Risks</h4>
-                      <ul className="space-y-1.5">
-                        {analysis.risks.map((r: string, i: number) => (
-                          <li key={i} className="flex gap-2 text-[13px] theme-text-secondary">
-                            <span className="theme-error shrink-0">&#9888;</span><span>{r}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {analysis.follow_ups?.length > 0 && (
-                    <div>
-                      <h4 className="text-[11px] font-semibold theme-text-muted uppercase tracking-wider mb-2">Follow-ups</h4>
-                      <ul className="space-y-1.5">
-                        {analysis.follow_ups.map((f: string, i: number) => (
-                          <li key={i} className="flex gap-2 text-[13px] theme-text-secondary">
-                            <span className="theme-accent-secondary shrink-0">&#8618;</span><span>{f}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
+                )}
+
+                {analysis.action_items?.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="flex items-center gap-2 text-[13px] font-semibold theme-text mb-3">
+                      <span className="theme-accent">#</span> Action Items
+                    </h3>
+                    <ul className="space-y-2 ml-5">
+                      {analysis.action_items.map((a: string, i: number) => (
+                        <li key={i} className="text-[13px] sm:text-[14px] theme-text-secondary leading-relaxed list-disc marker:theme-text-muted">{a}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {analysis.risks?.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="flex items-center gap-2 text-[13px] font-semibold theme-text mb-3">
+                      <span className="theme-accent">#</span> Risks &amp; Concerns
+                    </h3>
+                    <ul className="space-y-2 ml-5">
+                      {analysis.risks.map((r: string, i: number) => (
+                        <li key={i} className="text-[13px] sm:text-[14px] theme-text-secondary leading-relaxed list-disc marker:theme-text-muted">{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {analysis.questions?.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="flex items-center gap-2 text-[13px] font-semibold theme-text mb-3">
+                      <span className="theme-accent">#</span> Open Questions
+                    </h3>
+                    <ul className="space-y-2 ml-5">
+                      {analysis.questions.map((q: string, i: number) => (
+                        <li key={i} className="text-[13px] sm:text-[14px] theme-text-secondary leading-relaxed list-disc marker:theme-text-muted">{q}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {analysis.follow_ups?.length > 0 && (
+                  <div className="mb-6">
+                    <h3 className="flex items-center gap-2 text-[13px] font-semibold theme-text mb-3">
+                      <span className="theme-accent">#</span> Follow-ups
+                    </h3>
+                    <ul className="space-y-2 ml-5">
+                      {analysis.follow_ups.map((f: string, i: number) => (
+                        <li key={i} className="text-[13px] sm:text-[14px] theme-text-secondary leading-relaxed list-disc marker:theme-text-muted">{f}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -495,33 +645,85 @@ export default function App() {
               </div>
             </div>
           )}
+          {/* Ask Anything Chat */}
+          <div className="mt-8 sm:mt-10">
+            <div className="rounded-2xl border theme-border overflow-hidden">
+              <div className="flex items-center gap-2 px-4 py-3 border-b theme-border">
+                <svg className="w-4 h-4 theme-text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 01.865-.501 48.172 48.172 0 003.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0012 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018z" />
+                </svg>
+                <span className="text-[12px] theme-text-muted">Ask anything about this meeting</span>
+              </div>
+              {/* Messages */}
+              {askMessages.length > 0 && (
+                <div className="max-h-[300px] overflow-y-auto px-4 py-3 space-y-3">
+                  {askMessages.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                      <div className={`max-w-[85%] px-3 py-2 rounded-xl text-[13px] leading-relaxed ${
+                        msg.role === "user"
+                          ? "theme-accent-bg text-white"
+                          : "theme-surface-secondary theme-text-secondary border theme-border"
+                      }`}>
+                        {msg.text}
+                      </div>
+                    </div>
+                  ))}
+                  {askLoading && (
+                    <div className="flex justify-start">
+                      <div className="px-3 py-2 rounded-xl theme-surface-secondary theme-text-secondary border theme-border text-[13px]">
+                        <span className="animate-pulse">Thinking...</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* Input */}
+              <div className="flex items-center gap-2 px-4 py-3 border-t theme-border">
+                <input
+                  type="text"
+                  value={askPrompt}
+                  onChange={(e) => setAskPrompt(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleAsk(); } }}
+                  placeholder="e.g. What were the main decisions?"
+                  className="flex-1 bg-transparent text-[13px] sm:text-[14px] theme-text outline-none placeholder:theme-text-muted"
+                  disabled={askLoading}
+                />
+                <button
+                  onClick={handleAsk}
+                  disabled={askLoading || !askPrompt.trim()}
+                  className="shrink-0 p-2 rounded-full theme-accent-bg text-white hover:opacity-90 transition-opacity disabled:opacity-40"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="lg:ml-[240px]">
-          <MeetingHistory />
+          <MeetingHistory onSelectMeeting={setSelectedMeetingId} />
         </div>
       )}
 
       {/* Floating Bar */}
       {!isRecording && !showRecording && (
         <div className="fixed bottom-6 sm:bottom-8 left-0 right-0 z-50 flex justify-center pointer-events-none px-4">
-          <div className="pointer-events-auto theme-bg theme-border border rounded-[28px] sm:rounded-[32px] shadow-2xl overflow-visible">
+          <div className="pointer-events-auto theme-bg theme-border border rounded-full shadow-2xl overflow-visible">
             <div className="flex items-center gap-2 sm:gap-3 px-2 sm:px-3 py-2">
-              <div className="relative">
-                <button
-                  onClick={handleStart}
-                  disabled={isLoading}
-                  className="h-[48px] sm:h-[54px] px-4 sm:px-5 rounded-[24px] sm:rounded-[28px] theme-surface theme-border border flex items-center gap-2 sm:gap-3 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-40"
-                >
-                  <div className="flex items-center gap-0.5 sm:gap-1">
-                    <span className="w-1 h-2.5 sm:h-3 rounded-full theme-accent-bg animate-pulse" />
-                    <span className="w-1 h-3 sm:h-4 rounded-full theme-accent-bg animate-pulse" style={{ animationDelay: "0.15s" }} />
-                    <span className="w-1 h-2 sm:h-2.5 rounded-full theme-accent-bg animate-pulse" style={{ animationDelay: "0.3s" }} />
-                  </div>
-                  <span className="text-[12px] sm:text-[13px] font-medium theme-text-secondary">Record</span>
-                </button>
-              </div>
-              {/* Audio Source Selector */}
+              <button
+                onClick={handleStart}
+                disabled={isLoading}
+                className="h-[48px] sm:h-[54px] px-4 sm:px-5 rounded-full theme-surface theme-border border flex items-center gap-2 sm:gap-3 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-40"
+              >
+                <div className="flex items-center gap-0.5 sm:gap-1">
+                  <span className="w-1 h-2.5 sm:h-3 rounded-full theme-accent-bg animate-pulse" />
+                  <span className="w-1 h-3 sm:h-4 rounded-full theme-accent-bg animate-pulse" style={{ animationDelay: "0.15s" }} />
+                  <span className="w-1 h-2 sm:h-2.5 rounded-full theme-accent-bg animate-pulse" style={{ animationDelay: "0.3s" }} />
+                </div>
+                <span className="text-[12px] sm:text-[13px] font-medium theme-text-secondary">Record</span>
+              </button>
               <div className="flex items-center gap-1 theme-surface theme-border border rounded-full px-1 py-1">
                 <button
                   onClick={() => setAudioSource("mic")}
@@ -557,73 +759,6 @@ export default function App() {
                   </svg>
                 </button>
               </div>
-              {/* Search Bar */}
-              <div className="relative">
-                <form onSubmit={handleSearchSubmit} className="flex items-center">
-                  <div className="h-[40px] sm:h-[54px] w-[180px] sm:w-[480px] rounded-[20px] sm:rounded-[28px] theme-surface theme-border border items-center px-3 sm:px-5 flex gap-2">
-                    <input
-                      ref={searchInputRef}
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onFocus={() => searchResults.length > 0 && setShowSearch(true)}
-                      placeholder="Ask anything"
-                      className="flex-1 bg-transparent text-[12px] sm:text-[14px] theme-text outline-none placeholder:theme-text-muted min-w-0"
-                    />
-                    {searchQuery.trim() && (
-                      <button
-                        type="submit"
-                        disabled={isSearching}
-                        className="shrink-0 p-1 sm:p-1.5 rounded-full theme-accent-bg text-white hover:opacity-90 transition-opacity disabled:opacity-50"
-                        title="Search"
-                      >
-                        <svg className="w-3.5 h-3.5 sm:w-4 sm:h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-                        </svg>
-                      </button>
-                    )}
-                    {!searchQuery.trim() && (
-                      <button
-                        type="button"
-                        onClick={handleWhatDidIMiss}
-                        disabled={isSearching}
-                        className="shrink-0 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full theme-bg theme-border border text-[10px] sm:text-[12px] font-medium theme-text-secondary hover:theme-surface-hover transition-colors disabled:opacity-50"
-                      >
-                        {isSearching ? "..." : "What did I miss"}
-                      </button>
-                    )}
-                  </div>
-                </form>
-                {/* Search Results Dropdown */}
-                {showSearch && searchResults.length > 0 && (
-                  <div className="absolute bottom-full left-0 right-0 mb-2 theme-surface theme-border border rounded-2xl shadow-xl max-h-[300px] overflow-y-auto">
-                    {searchResults.map((result: any) => (
-                      <button
-                        key={result.id}
-                        onClick={() => {
-                          setView("history");
-                          setShowSearch(false);
-                          setSearchQuery("");
-                        }}
-                        className="w-full px-4 py-3 text-left hover:theme-surface-hover transition-colors border-b theme-border last:border-b-0 first:rounded-t-2xl last:rounded-b-2xl"
-                      >
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-[13px] font-medium theme-text truncate">{result.title || "Untitled"}</span>
-                          <span className="text-[11px] theme-text-muted shrink-0">{result.segment_count} segs</span>
-                        </div>
-                        {result.matched_segments?.slice(0, 2).map((seg: any, i: number) => (
-                          <p key={i} className="text-[12px] theme-text-secondary truncate">&quot;{seg.text}&quot;</p>
-                        ))}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {showSearch && searchResults.length === 0 && !isSearching && (
-                  <div className="absolute bottom-full left-0 right-0 mb-2 theme-surface theme-border border rounded-2xl shadow-xl px-4 py-3">
-                    <p className="text-[12px] theme-text-muted text-center">No results found</p>
-                  </div>
-                )}
-              </div>
             </div>
           </div>
         </div>
@@ -634,9 +769,18 @@ export default function App() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
           <div className="w-full max-w-[690px] max-h-[85vh] rounded-[24px] sm:rounded-[28px] theme-surface theme-border border overflow-hidden animate-fade-in-up">
             <div className="flex items-center justify-between px-5 py-4">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full theme-recording-bg animate-pulse" />
-                <span className="text-[12px] font-medium theme-recording uppercase tracking-wider">Recording</span>
+              <div className="flex items-center gap-3 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full theme-recording-bg animate-pulse" />
+                  <span className="text-[12px] font-medium theme-recording uppercase tracking-wider">Recording</span>
+                </div>
+                <input
+                  type="text"
+                  value={meetingTitle}
+                  onChange={(e) => setMeetingTitle(e.target.value)}
+                  placeholder="Untitled meeting"
+                  className="flex-1 max-w-[260px] bg-transparent text-[13px] theme-text outline-none placeholder:theme-text-muted border-b theme-border focus:border-blue-500 transition-colors pb-0.5"
+                />
               </div>
               <div className="flex items-center gap-1">
                 <button
@@ -731,6 +875,18 @@ export default function App() {
             >
               <div className="w-3 h-3 rounded-sm bg-white" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Rate Limit Popup */}
+      {rateLimitPopup && (
+        <div className="fixed top-4 right-4 z-[100] animate-fade-in-up">
+          <div className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-3 shadow-lg flex items-center gap-2">
+            <svg className="w-4 h-4 text-red-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+            <span className="text-[13px] text-red-300">API rate limit reached. Please wait a moment.</span>
           </div>
         </div>
       )}

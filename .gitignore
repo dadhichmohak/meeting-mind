@@ -1,5 +1,6 @@
 # Environment / secrets
 .env
+!.env.example
 
 # Database
 *.db
@@ -21,6 +22,6 @@ exports/
 frontend/dist/
 node_modules/
 
-# Markdown files (except README)
-*.md
+# Markdown transcripts (except README)
+meetings/*.md
 !README.md

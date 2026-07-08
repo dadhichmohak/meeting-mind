@@ -10,7 +10,7 @@ from backend.config import Config
 
 setup_logger()
 
-app = FastAPI(title="MeetingMind AI", version="0.1.0")
+app = FastAPI(title="MetMind", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,

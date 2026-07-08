@@ -12,7 +12,7 @@ logger.add(sys.stderr, format="<level>{level: <8}</level> | {message}")
 
 
 def main():
-    print("\n=== MeetingMind AI Configuration Check ===\n")
+    print("\n=== MetMind Configuration Check ===\n")
 
     # Check basic config
     print(f"GROQ_API_KEY: {'SET ✓' if Config.GROQ_API_KEY else 'NOT SET ✗'}")

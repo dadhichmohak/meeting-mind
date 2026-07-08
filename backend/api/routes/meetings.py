@@ -24,7 +24,6 @@ from backend.database import SessionLocal, init_db
 from backend.models import Meeting, TranscriptSegment as TranscriptSegmentRow, Note
 from backend.audio.capture import AudioCapture
 from backend.audio.stream import AudioStreamQueue
-from backend.audio.vad import VoiceActivityDetector
 from backend.audio.apps import list_audio_apps, list_input_devices, list_output_devices
 from backend.whisper.transcriber import Transcriber, TranscriptSegment
 from backend.api.websocket import manager, push_segment, push_status
@@ -157,8 +156,10 @@ async def list_meetings(limit: int = 50, offset: int = 0):
 
 
 @router.get("/search")
-async def search_meetings(q: str = "", limit: int = 20):
-    """Full-text search across meeting titles and transcript segments."""
+async def search_meetings(q: str = "", limit: int = 20, meeting_id: str = ""):
+    """Full-text search across meeting titles and transcript segments.
+    If meeting_id provided, uses that meeting's transcript for LLM context.
+    If no results found and query looks like a question, use LLM to answer."""
     if not q.strip():
         return {"results": [], "query": q}
 
@@ -240,7 +241,97 @@ async def search_meetings(q: str = "", limit: int = 20):
                 "matched_segments": seg_by_meeting.get(m.id, []),
             })
 
-        return {"results": results[:limit], "query": q}
+        # If no text matches found and query looks like a question, try LLM answer
+        llm_answer = None
+        is_question = "?" in q or q.lower().startswith(("what", "how", "why", "when", "where", "who", "which", "is ", "are ", "did ", "was ", "were "))
+        if not results and is_question:
+            transcript_parts = []
+
+            # Priority 1: Use the specific meeting's transcript if provided
+            if meeting_id:
+                target_meeting = db.get(Meeting, meeting_id)
+                if target_meeting:
+                    segs = (
+                        db.query(TranscriptSegmentRow)
+                        .filter(TranscriptSegmentRow.meeting_id == meeting_id)
+                        .order_by(TranscriptSegmentRow.sequence)
+                        .all()
+                    )
+                    if segs:
+                        text = " ".join(s.text for s in segs)
+                        title = target_meeting.title or target_meeting.id
+                        transcript_parts.append(f"[{title}]: {text}")
+
+            # Priority 2: Also include recent meetings for broader context
+            if len(transcript_parts) < 2:
+                recent_meetings = (
+                    db.query(Meeting)
+                    .filter(Meeting.status == "completed")
+                    .order_by(Meeting.started_at.desc())
+                    .limit(5)
+                    .all()
+                )
+                for m in recent_meetings:
+                    if m.id == meeting_id:
+                        continue  # skip if already added
+                    segs = (
+                        db.query(TranscriptSegmentRow)
+                        .filter(TranscriptSegmentRow.meeting_id == m.id)
+                        .order_by(TranscriptSegmentRow.sequence)
+                        .all()
+                    )
+                    if segs:
+                        text = " ".join(s.text for s in segs)
+                        title = m.title or m.id
+                        transcript_parts.append(f"[{title}]: {text}")
+
+            if transcript_parts:
+                from backend.llm.groq_engine import GroqEngine
+                llm = GroqEngine()
+                if llm.health_check():
+                    combined = "\n\n".join(transcript_parts)
+                    system = (
+                        "You are a helpful meeting assistant. Answer the user's question "
+                        "based on the meeting transcripts provided. Be concise and factual. "
+                        "If the transcripts don't contain relevant information, say so."
+                    )
+                    user = f"Meeting transcripts:\n{combined}\n\nQuestion: {q}"
+                    llm_answer = llm.generate(user, system=system, temperature=0.3)
+
+        return {"results": results[:limit], "query": q, "llm_answer": llm_answer}
+
+
+class AskRequest(BaseModel):
+    prompt: str
+    transcript: str = ""
+    groq_api_key: str | None = None
+
+
+@router.post("/ask")
+async def ask_about_meeting(req: AskRequest):
+    """Send a prompt to the LLM with transcript context and return the response."""
+    from backend.llm.groq_engine import GroqEngine
+
+    llm = GroqEngine(api_key=req.groq_api_key or None)
+    if not llm.health_check():
+        return {"error": "LLM unavailable. Set GROQ_API_KEY in .env."}
+
+    system = (
+        "You are a helpful meeting assistant. "
+        "Answer the user's question based on the meeting transcript provided. "
+        "Be concise, factual, and reference specific points from the transcript. "
+        "If the transcript doesn't contain relevant information, say so."
+    )
+    user = req.prompt
+    if req.transcript:
+        user = f"Meeting transcript:\n{req.transcript}\n\nQuestion: {req.prompt}"
+
+    response = llm.generate(user, system=system, temperature=0.3)
+    if response == "RATE_LIMIT_ERROR":
+        return {"error": "API rate limit reached. Please wait a moment and try again."}
+    if not response:
+        return {"error": "LLM failed to respond"}
+    return {"response": response}
 
 
 class EditMeetingRequest(BaseModel):
@@ -357,10 +448,8 @@ async def start_meeting(req: StartRequest):
 
     q = AudioStreamQueue(sample_rate=16000)
 
-    vad = None
-    if req.vad_enabled:
-        vad = VoiceActivityDetector()
-        vad.load()
+    # VAD disabled at capture level — Whisper's built-in VAD is more accurate
+    # and removing capture VAD prevents dropping audio chunks that cause word skipping.
 
     # Use WASAPI loopback for system audio (works even when volume is down)
     wasapi = None
@@ -368,7 +457,6 @@ async def start_meeting(req: StartRequest):
         try:
             wasapi = WASAPICapture(
                 stream_queue=q,
-                vad=vad,
                 sample_rate=16000,
             )
         except Exception as e:
@@ -376,7 +464,6 @@ async def start_meeting(req: StartRequest):
 
     session.capture = AudioCapture(
         stream_queue=q,
-        vad=vad,
         mic_device=req.mic_device,
         loopback_device=req.loopback_device,
     )
@@ -410,7 +497,7 @@ async def start_meeting(req: StartRequest):
         stream_queue=q,
         model_size=req.model_size,
         language=req.language,
-        buffer_duration_s=4.0,
+        buffer_duration_s=2.0,
         overlap_duration_s=1.5,
         on_segment=on_segment,
     )
@@ -487,7 +574,7 @@ async def stop_meeting():
     else:
         analysis = {"info": "GROQ_API_KEY not set — skipping analysis. Set it in .env to enable."}
 
-    # Generate meeting title from analysis summary
+    # Generate meeting title from analysis summary (only if user didn't provide one)
     meeting_title = _generate_title(analysis, session.start_time)
 
     # Save transcript with analysis (Markdown export artifact)
@@ -507,7 +594,9 @@ async def stop_meeting():
                 meeting.ended_at = datetime.now()
                 meeting.duration_seconds = duration
                 meeting.analysis = analysis_json
-                meeting.title = meeting_title
+                # Only auto-generate title if user didn't provide one at start
+                if not meeting.title:
+                    meeting.title = meeting_title
                 db.commit()
     except Exception as e:
         logger.warning(f"Failed to finalize meeting row: {e}")

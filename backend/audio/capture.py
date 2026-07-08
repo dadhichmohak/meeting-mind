@@ -12,14 +12,12 @@ import sounddevice as sd
 from loguru import logger
 
 from backend.audio.stream import AudioStreamQueue
-from backend.audio.vad import VoiceActivityDetector
 
 
 class AudioCapture:
     def __init__(
         self,
         stream_queue: AudioStreamQueue,
-        vad: VoiceActivityDetector | None = None,
         sample_rate: int = 16000,
         channels: int = 1,
         chunk_duration_ms: int = 500,
@@ -27,7 +25,6 @@ class AudioCapture:
         loopback_device: int | None = None,
     ):
         self.queue = stream_queue
-        self.vad = vad
         self.sample_rate = sample_rate
         self.chunk_size = int(sample_rate * chunk_duration_ms / 1000)
         self.mic_device = mic_device
@@ -55,8 +52,6 @@ class AudioCapture:
         if status:
             logger.debug(f"Audio status: {status}")
         chunk = indata[:, 0]  # mono
-        if self.vad and not self.vad.is_speech(chunk):
-            return
         self.queue.put(chunk)
 
     def _open_stream(self, device: int | None) -> sd.InputStream:
