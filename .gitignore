@@ -24,4 +24,5 @@ node_modules/
 
 # Markdown transcripts (except README)
 meetings/*.md
+*.md
 !README.md
