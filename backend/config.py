@@ -18,8 +18,12 @@ class Config:
     GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
     GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-    # Whisper transcription model: tiny, base, small, medium, large-v3
-    WHISPER_MODEL = os.getenv("WHISPER_MODEL", "medium")
+    # Whisper transcription model: tiny, base, small, medium, large-v3, large-v3-turbo
+    WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
+
+    # Live transcription tuning (seconds)
+    WHISPER_BUFFER_S = float(os.getenv("WHISPER_BUFFER_S", "4.0"))
+    WHISPER_OVERLAP_S = float(os.getenv("WHISPER_OVERLAP_S", "1.0"))
 
     # Server
     BACKEND_HOST = os.getenv("BACKEND_HOST", "127.0.0.1")

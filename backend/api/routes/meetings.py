@@ -498,8 +498,8 @@ async def start_meeting(req: StartRequest):
         stream_queue=q,
         model_size=req.model_size,
         language=req.language,
-        buffer_duration_s=2.0,
-        overlap_duration_s=1.5,
+        buffer_duration_s=Config.WHISPER_BUFFER_S,
+        overlap_duration_s=Config.WHISPER_OVERLAP_S,
         on_segment=on_segment,
     )
     session.transcriber.load_model()
